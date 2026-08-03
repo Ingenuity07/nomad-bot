@@ -422,14 +422,49 @@ class ProspectingDiscoverAPIView(APIView):
 
 
 class ProspectingLeadsAPIView(APIView):
-    """Retrieve all leads in the CRM along with contacts and qualification scores."""
+    """Retrieve all leads in the CRM along with contacts and qualification scores, supporting filtering and pagination."""
 
     def get(self, request):
         from memory.models import LeadCompany
-        companies = LeadCompany.objects.all().order_by('-analysis__lead_score')
         
+        # 1. Fetch query filters
+        score_min = request.query_params.get("score_min")
+        location = request.query_params.get("location")
+        category = request.query_params.get("category")
+        
+        # 2. Fetch pagination params
+        try:
+            page = int(request.query_params.get("page", 1))
+            page_size = int(request.query_params.get("page_size", 10))
+        except ValueError:
+            page = 1
+            page_size = 10
+
+        # Build filter set
+        queryset = LeadCompany.objects.all()
+        
+        if score_min:
+            try:
+                queryset = queryset.filter(analysis__lead_score__gte=float(score_min))
+            except ValueError:
+                pass
+        if location and location.strip():
+            queryset = queryset.filter(address__icontains=location.strip())
+        if category and category.strip():
+            queryset = queryset.filter(category__iexact=category.strip())
+            
+        queryset = queryset.order_by('-analysis__lead_score', 'name')
+        
+        total_count = queryset.count()
+        total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
+        
+        # Slice queryset for pagination
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_companies = queryset[start_idx:end_idx]
+
         leads = []
-        for c in companies:
+        for c in paginated_companies:
             contacts = [{
                 "id": str(con.id),
                 "email": con.email,
@@ -461,7 +496,18 @@ class ProspectingLeadsAPIView(APIView):
                 "analysis": analysis_data
             })
 
-        return Response(leads, status=status.HTTP_200_OK)
+        # Fetch unique categories for dynamic UI dropdown
+        unique_categories = list(LeadCompany.objects.values_list('category', flat=True).distinct())
+        unique_categories = sorted(list(set([cat for cat in unique_categories if cat])))
+
+        return Response({
+            "leads": leads,
+            "total_count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "categories": unique_categories
+        }, status=status.HTTP_200_OK)
 
 
 class ProspectingResetAPIView(APIView):

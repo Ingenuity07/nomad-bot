@@ -223,13 +223,41 @@ class NomadV3EngineTestCase(TestCase):
         self.assertEqual(LeadCompany.objects.count(), 0)
 
     def test_prospecting_leads_list(self):
-        from memory.models import LeadCompany, DiscoveryRun
+        from memory.models import LeadCompany, DiscoveryRun, WebsiteAnalysis
         run = DiscoveryRun.objects.create(user_profile=self.user, keyword="courier", location="london")
-        LeadCompany.objects.create(discovery_run=run, name="Courier London")
+        c1 = LeadCompany.objects.create(discovery_run=run, name="Courier London", category="Courier Service", address="London, UK")
+        WebsiteAnalysis.objects.create(company=c1, lead_score=8.5, description="A", lead_score_reason="B")
         
+        c2 = LeadCompany.objects.create(discovery_run=run, name="Cargo Manchester", category="Freight", address="Manchester, UK")
+        WebsiteAnalysis.objects.create(company=c2, lead_score=4.0, description="A", lead_score_reason="B")
+
+        # 1. Base list response
         response = self.client.get('/api/v3/prospecting/leads/')
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(any(l["name"] == "Courier London" for l in response.json()))
+        data = response.json()
+        self.assertIn("leads", data)
+        self.assertEqual(data["total_count"], 2)
+        self.assertTrue(any(l["name"] == "Courier London" for l in data["leads"]))
+        self.assertIn("Courier Service", data["categories"])
+        self.assertIn("Freight", data["categories"])
+
+        # 2. Filter by category
+        res_filter_cat = self.client.get('/api/v3/prospecting/leads/?category=Freight')
+        self.assertEqual(res_filter_cat.status_code, 200)
+        self.assertEqual(res_filter_cat.json()["total_count"], 1)
+        self.assertEqual(res_filter_cat.json()["leads"][0]["name"], "Cargo Manchester")
+
+        # 3. Filter by min score
+        res_filter_score = self.client.get('/api/v3/prospecting/leads/?score_min=5.0')
+        self.assertEqual(res_filter_score.status_code, 200)
+        self.assertEqual(res_filter_score.json()["total_count"], 1)
+        self.assertEqual(res_filter_score.json()["leads"][0]["name"], "Courier London")
+
+        # 4. Pagination
+        res_page = self.client.get('/api/v3/prospecting/leads/?page=1&page_size=1')
+        self.assertEqual(res_page.status_code, 200)
+        self.assertEqual(len(res_page.json()["leads"]), 1)
+        self.assertEqual(res_page.json()["total_pages"], 2)
 
 
 

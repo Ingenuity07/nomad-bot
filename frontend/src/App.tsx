@@ -70,6 +70,16 @@ function App() {
   const [prospectLeads, setProspectLeads] = useState<any[]>([]);
   const [isProspecting, setIsProspecting] = useState(false);
   const [selectedLead, setSelectedLead] = useState<any>(null);
+
+  // Filter & Pagination States
+  const [prospectFilterScore, setProspectFilterScore] = useState('');
+  const [prospectFilterLocation, setProspectFilterLocation] = useState('');
+  const [debouncedFilterLocation, setDebouncedFilterLocation] = useState('');
+  const [prospectFilterCategory, setProspectFilterCategory] = useState('');
+  const [prospectPage, setProspectPage] = useState(1);
+  const [prospectTotalPages, setProspectTotalPages] = useState(1);
+  const [prospectTotalCount, setProspectTotalCount] = useState(0);
+  const [prospectCategoriesList, setProspectCategoriesList] = useState<string[]>([]);
   
   // User Model Selection State (Default: auto)
   const [userSelectedProvider, setUserSelectedProvider] = useState<string>('auto');
@@ -77,6 +87,14 @@ function App() {
   // Models modal state
   const [showModelsModal, setShowModelsModal] = useState(false);
   const [providersData, setProvidersData] = useState<ProvidersStatusData | null>(null);
+
+  // Debounce Location input changes by 400ms to avoid overlapping API requests
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedFilterLocation(prospectFilterLocation);
+    }, 400);
+    return () => clearTimeout(handler);
+  }, [prospectFilterLocation]);
 
   // Agent selector & field states
   const [agentType, setAgentType] = useState<AgentType>('general');
@@ -270,10 +288,24 @@ function App() {
     }
   };
 
-  const fetchProspectLeads = async () => {
+  const fetchProspectLeads = async (pageOverride?: number) => {
     try {
-      const res = await axios.get('http://localhost:8000/api/v3/prospecting/leads/');
-      setProspectLeads(res.data);
+      const pageToFetch = pageOverride !== undefined ? pageOverride : prospectPage;
+      const params = new URLSearchParams();
+      params.append('page', String(pageToFetch));
+      params.append('page_size', '10');
+      if (prospectFilterScore) params.append('score_min', prospectFilterScore);
+      if (debouncedFilterLocation) params.append('location', debouncedFilterLocation);
+      if (prospectFilterCategory) params.append('category', prospectFilterCategory);
+
+      const res = await axios.get(`http://localhost:8000/api/v3/prospecting/leads/?${params.toString()}`);
+      setProspectLeads(res.data.leads || []);
+      setProspectTotalPages(res.data.total_pages || 1);
+      setProspectTotalCount(res.data.total_count || 0);
+      setProspectCategoriesList(res.data.categories || []);
+      if (pageOverride !== undefined) {
+        setProspectPage(pageOverride);
+      }
     } catch (err) {
       console.error("Failed to load prospect leads:", err);
     }
@@ -290,7 +322,7 @@ function App() {
         keyword: prospectKeyword,
         location: prospectLocation
       });
-      fetchProspectLeads();
+      fetchProspectLeads(1);
       alert("Lead discovery run completed successfully!");
     } catch (err) {
       console.error("Prospecting run error:", err);
@@ -304,7 +336,7 @@ function App() {
     if (!confirm("Are you sure you want to clear all leads in CRM?")) return;
     try {
       await axios.post('http://localhost:8000/api/v3/prospecting/reset/');
-      fetchProspectLeads();
+      fetchProspectLeads(1);
       setSelectedLead(null);
       alert("Leads directory cleared.");
     } catch (err) {
@@ -312,12 +344,16 @@ function App() {
     }
   };
 
+  // Run lead search on filter changes
+  useEffect(() => {
+    fetchProspectLeads(1);
+  }, [prospectFilterScore, debouncedFilterLocation, prospectFilterCategory]);
+
   useEffect(() => {
     fetchConversations();
     fetchKnowledgeBase();
     fetchVersions();
     fetchApplications();
-    fetchProspectLeads();
   }, []);
 
   const handleSelectConversation = async (id: string) => {
@@ -1596,148 +1632,234 @@ function App() {
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: selectedLead ? '1.5fr 1fr' : '1fr', gap: '20px' }}>
-            {/* Leads Table Card */}
+          {/* Filters Bar Card */}
+          <div className="v3-card" style={{ marginBottom: '20px', padding: '15px' }}>
+            <div className="v3-card-title" style={{ marginBottom: '10px' }}>
+              <Sliders size={16} color="#6366f1" />
+              <span>Filter Leads Directory</span>
+            </div>
+            <div style={{ display: 'flex', gap: '15px' }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '3px' }}>Category</label>
+                <select 
+                  className="v3-input" 
+                  value={prospectFilterCategory} 
+                  onChange={e => setProspectFilterCategory(e.target.value)}
+                  style={{ height: '35px', padding: '0 10px' }}
+                >
+                  <option value="">All Categories</option>
+                  {prospectCategoriesList.map(cat => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '3px' }}>Location</label>
+                <input 
+                  type="text" 
+                  className="v3-input" 
+                  placeholder="Filter by city/address..."
+                  value={prospectFilterLocation}
+                  onChange={e => setProspectFilterLocation(e.target.value)}
+                  style={{ height: '35px', padding: '0 10px' }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '3px' }}>Min Suitability Score</label>
+                <select 
+                  className="v3-input" 
+                  value={prospectFilterScore} 
+                  onChange={e => setProspectFilterScore(e.target.value)}
+                  style={{ height: '35px', padding: '0 10px' }}
+                >
+                  <option value="">All Scores</option>
+                  <option value="8">8.0+ (Excellent)</option>
+                  <option value="5">5.0+ (Moderate)</option>
+                  <option value="3">3.0+ (Low)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: selectedLead ? '1.4fr 1.6fr' : '1fr', gap: '20px', alignItems: 'start' }}>
+            {/* Leads Table Card (Left Column, Scrollable) */}
             <div className="v3-card">
               <div className="v3-card-title">
                 <Database size={16} color="#6366f1" />
-                <span>CRM Qualified Leads Directory ({prospectLeads.length})</span>
+                <span>CRM Qualified Leads Directory ({prospectTotalCount} total leads)</span>
               </div>
-              <table className="v3-table">
-                <thead>
-                  <tr>
-                    <th>Business Name</th>
-                    <th>Category</th>
-                    <th>Address</th>
-                    <th>Lead Score</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {prospectLeads.map((lead: any) => {
-                    const score = lead.analysis?.lead_score || 0;
-                    const scoreColor = score >= 8 ? '#10b981' : score >= 5 ? '#f59e0b' : '#ef4444';
-                    return (
-                      <tr key={lead.id} className={selectedLead?.id === lead.id ? 'active-row' : ''} style={{ cursor: 'pointer' }} onClick={() => setSelectedLead(lead)}>
-                        <td className="font-weight-600">
-                          {lead.name}
-                          {lead.website && (
-                            <a href={lead.website} target="_blank" rel="noreferrer" style={{ marginLeft: '8px', color: '#6366f1', fontSize: '11px' }}>
-                              Visit Website
-                            </a>
-                          )}
-                        </td>
-                        <td>{lead.category || 'N/A'}</td>
-                        <td>{lead.address || 'N/A'}</td>
-                        <td>
-                          <span className="v3-ats-pill" style={{ backgroundColor: `${scoreColor}15`, color: scoreColor, borderColor: `${scoreColor}40` }}>
-                            {score.toFixed(1)}/10
-                          </span>
-                        </td>
-                        <td>
-                          <button 
-                            type="button" 
-                            className="v3-btn-subtle" 
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSelectedLead(lead);
-                            }}
-                          >
-                            Inspect
-                          </button>
+              
+              <div style={{ maxHeight: '60vh', overflowY: 'auto', border: '1px solid var(--border-color)', borderRadius: '6px' }}>
+                <table className="v3-table">
+                  <thead>
+                    <tr>
+                      <th>Business Name</th>
+                      <th>Category</th>
+                      <th>Location</th>
+                      <th>Lead Score</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {prospectLeads.map((lead: any) => {
+                      const score = lead.analysis?.lead_score || 0;
+                      const scoreColor = score >= 8 ? '#10b981' : score >= 5 ? '#f59e0b' : '#ef4444';
+                      return (
+                        <tr 
+                          key={lead.id} 
+                          className={selectedLead?.id === lead.id ? 'active-row' : ''} 
+                          style={{ cursor: 'pointer' }} 
+                          onClick={() => setSelectedLead(lead)}
+                        >
+                          <td className="font-weight-600">
+                            {lead.name}
+                            {lead.website && (
+                              <a href={lead.website} target="_blank" rel="noreferrer" style={{ marginLeft: '8px', color: '#6366f1', fontSize: '11px' }}>
+                                Visit Website
+                              </a>
+                            )}
+                          </td>
+                          <td>{lead.category || 'N/A'}</td>
+                          <td>{lead.address || 'N/A'}</td>
+                          <td>
+                            <span className="v3-ats-pill" style={{ backgroundColor: `${scoreColor}15`, color: scoreColor, borderColor: `${scoreColor}40` }}>
+                              {score.toFixed(1)}/10
+                            </span>
+                          </td>
+                          <td>
+                            <button 
+                              type="button" 
+                              className="v3-btn-subtle" 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedLead(lead);
+                              }}
+                            >
+                              Inspect
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {prospectLeads.length === 0 && (
+                      <tr>
+                        <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '30px' }}>
+                          No matching leads found.
                         </td>
                       </tr>
-                    );
-                  })}
-                  {prospectLeads.length === 0 && (
-                    <tr>
-                      <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '30px' }}>
-                        No leads currently in CRM directory. Launch a discovery run above to generate prospects!
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination Controls */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '15px', paddingTop: '15px', borderTop: '1px solid var(--border-color)' }}>
+                <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                  Page {prospectPage} of {prospectTotalPages} ({prospectTotalCount} total leads)
+                </span>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button 
+                    type="button" 
+                    className="v3-btn-subtle" 
+                    disabled={prospectPage <= 1} 
+                    onClick={() => fetchProspectLeads(prospectPage - 1)}
+                    style={{ padding: '5px 12px', minWidth: 'auto' }}
+                  >
+                    Previous
+                  </button>
+                  <button 
+                    type="button" 
+                    className="v3-btn-subtle" 
+                    disabled={prospectPage >= prospectTotalPages} 
+                    onClick={() => fetchProspectLeads(prospectPage + 1)}
+                    style={{ padding: '5px 12px', minWidth: 'auto' }}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
             </div>
 
-            {/* Leads Side Inspector Panel */}
+            {/* Leads Side Inspector Panel (Right Column, Sticky) */}
             {selectedLead && (
-              <div className="v3-card animate-fade-in" style={{ height: 'fit-content' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '10px', marginBottom: '15px' }}>
-                  <h3 style={{ margin: 0 }}>Lead Suitability Profile</h3>
-                  <button type="button" className="v3-btn-subtle" style={{ minWidth: 'auto', padding: '4px 8px' }} onClick={() => setSelectedLead(null)}>X</button>
-                </div>
-                
-                <h2 style={{ fontSize: '20px', margin: '0 0 5px 0' }}>{selectedLead.name}</h2>
-                <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: '0 0 15px 0' }}>{selectedLead.address}</p>
-
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '20px' }}>
-                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '10px', borderRadius: '6px' }}>
-                    <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)' }}>Lead Score</span>
-                    <span style={{ fontSize: '24px', fontWeight: 700, color: (selectedLead.analysis?.lead_score || 0) >= 8 ? '#10b981' : '#f59e0b' }}>
-                      {selectedLead.analysis?.lead_score?.toFixed(1) || 'N/A'}/10
-                    </span>
+              <div style={{ position: 'sticky', top: '10px' }}>
+                <div className="v3-card animate-fade-in" style={{ height: 'fit-content', maxHeight: '82vh', overflowY: 'auto' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '10px', marginBottom: '15px' }}>
+                    <h3 style={{ margin: 0 }}>Lead Suitability Profile</h3>
+                    <button type="button" className="v3-btn-subtle" style={{ minWidth: 'auto', padding: '4px 8px' }} onClick={() => setSelectedLead(null)}>X</button>
                   </div>
-                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '10px', borderRadius: '6px' }}>
-                    <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)' }}>Fleet Size Estimate</span>
-                    <span style={{ fontSize: '18px', fontWeight: 600 }}>{selectedLead.analysis?.fleet_size_estimate || 'Unknown'}</span>
-                  </div>
-                </div>
+                  
+                  <h2 style={{ fontSize: '20px', margin: '0 0 5px 0' }}>{selectedLead.name}</h2>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '13px', margin: '0 0 15px 0' }}>{selectedLead.address}</p>
 
-                <div style={{ marginBottom: '20px' }}>
-                  <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 600 }}>Operational Suitability Checks</h4>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                      <span>Has Deliveries:</span>
-                      <span style={{ fontWeight: 600, color: selectedLead.analysis?.has_delivery ? '#10b981' : '#ef4444' }}>
-                        {selectedLead.analysis?.has_delivery ? 'YES' : 'NO'}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '20px' }}>
+                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '10px', borderRadius: '6px' }}>
+                      <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)' }}>Lead Score</span>
+                      <span style={{ fontSize: '24px', fontWeight: 700, color: (selectedLead.analysis?.lead_score || 0) >= 8 ? '#10b981' : '#f59e0b' }}>
+                        {selectedLead.analysis?.lead_score?.toFixed(1) || 'N/A'}/10
                       </span>
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                      <span>Has Appointment Scheduling:</span>
-                      <span style={{ fontWeight: 600, color: selectedLead.analysis?.has_scheduling ? '#10b981' : '#ef4444' }}>
-                        {selectedLead.analysis?.has_scheduling ? 'YES' : 'NO'}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                      <span>Needs Daily Route Planning:</span>
-                      <span style={{ fontWeight: 600, color: selectedLead.analysis?.needs_routing ? '#10b981' : '#ef4444' }}>
-                        {selectedLead.analysis?.needs_routing ? 'YES' : 'NO'}
-                      </span>
+                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '10px', borderRadius: '6px' }}>
+                      <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)' }}>Fleet Size Estimate</span>
+                      <span style={{ fontSize: '18px', fontWeight: 600 }}>{selectedLead.analysis?.fleet_size_estimate || 'Unknown'}</span>
                     </div>
                   </div>
-                </div>
 
-                <div style={{ marginBottom: '20px' }}>
-                  <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 600 }}>Qualitative Summary</h4>
-                  <p style={{ fontSize: '13px', lineHeight: 1.5, background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '6px', borderLeft: '3px solid #6366f1' }}>
-                    {selectedLead.analysis?.description || 'No summary extracted.'}
-                  </p>
-                  <p style={{ fontSize: '12px', fontStyle: 'italic', marginTop: '10px', color: 'var(--text-muted)' }}>
-                    Reasoning: {selectedLead.analysis?.lead_score_reason || 'N/A'}
-                  </p>
-                </div>
-
-                <div>
-                  <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 600 }}>Contact Information ({selectedLead.contacts?.length || 0})</h4>
-                  {selectedLead.contacts?.map((con: any, i: number) => (
-                    <div key={i} style={{ padding: '8px', border: '1px solid var(--border-color)', borderRadius: '4px', marginBottom: '8px', fontSize: '13px' }}>
-                      {con.email !== 'linkedin@placeholder.com' ? (
-                        <div>
-                          <strong>Email:</strong> {con.email}
-                        </div>
-                      ) : (
-                        <div>
-                          <strong>LinkedIn URL:</strong> <a href={con.linkedin} target="_blank" rel="noreferrer" style={{ color: '#6366f1' }}>View Company Profile</a>
-                        </div>
-                      )}
+                  <div style={{ marginBottom: '20px' }}>
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 600 }}>Operational Suitability Checks</h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                        <span>Has Deliveries:</span>
+                        <span style={{ fontWeight: 600, color: selectedLead.analysis?.has_delivery ? '#10b981' : '#ef4444' }}>
+                          {selectedLead.analysis?.has_delivery ? 'YES' : 'NO'}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                        <span>Has Appointment Scheduling:</span>
+                        <span style={{ fontWeight: 600, color: selectedLead.analysis?.has_scheduling ? '#10b981' : '#ef4444' }}>
+                          {selectedLead.analysis?.has_scheduling ? 'YES' : 'NO'}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                        <span>Needs Daily Route Planning:</span>
+                        <span style={{ fontWeight: 600, color: selectedLead.analysis?.needs_routing ? '#10b981' : '#ef4444' }}>
+                          {selectedLead.analysis?.needs_routing ? 'YES' : 'NO'}
+                        </span>
+                      </div>
                     </div>
-                  ))}
-                  {selectedLead.contacts?.length === 0 && (
-                    <p style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                      No direct contact emails or social links extracted from homepage footer.
+                  </div>
+
+                  <div style={{ marginBottom: '20px' }}>
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 600 }}>Qualitative Summary</h4>
+                    <p style={{ fontSize: '13px', lineHeight: 1.5, background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '6px', borderLeft: '3px solid #6366f1' }}>
+                      {selectedLead.analysis?.description || 'No summary extracted.'}
                     </p>
-                  )}
+                    <p style={{ fontSize: '12px', fontStyle: 'italic', marginTop: '10px', color: 'var(--text-muted)' }}>
+                      Reasoning: {selectedLead.analysis?.lead_score_reason || 'N/A'}
+                    </p>
+                  </div>
+
+                  <div>
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 600 }}>Contact Information ({selectedLead.contacts?.length || 0})</h4>
+                    {selectedLead.contacts?.map((con: any, i: number) => (
+                      <div key={i} style={{ padding: '8px', border: '1px solid var(--border-color)', borderRadius: '4px', marginBottom: '8px', fontSize: '13px' }}>
+                        {con.email !== 'linkedin@placeholder.com' ? (
+                          <div>
+                            <strong>Email:</strong> {con.email}
+                          </div>
+                        ) : (
+                          <div>
+                            <strong>LinkedIn URL:</strong> <a href={con.linkedin} target="_blank" rel="noreferrer" style={{ color: '#6366f1' }}>View Company Profile</a>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {selectedLead.contacts?.length === 0 && (
+                      <p style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                        No direct contact emails or social links extracted from homepage footer.
+                      </p>
+                    )}
+                  </div>
                 </div>
               </div>
             )}

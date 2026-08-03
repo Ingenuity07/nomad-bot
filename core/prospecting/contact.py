@@ -30,8 +30,8 @@ class ContactExtractor:
         found_phones = set()
         found_linkedins = set()
 
-        # Crawl homepage and up to 4 key subpages
-        pages_limit = 5
+        # Crawl homepage and up to 7 key subpages
+        pages_limit = 8
         pages_visited = 0
 
         while to_visit and pages_visited < pages_limit:
@@ -97,6 +97,9 @@ class ContactExtractor:
 
                 # 4. Find internal links to visit next (only on the homepage/first turn)
                 if pages_visited == 1:
+                    priority_links = []
+                    regular_links = []
+
                     for link in soup.find_all("a", href=True):
                         href = link["href"]
                         # Resolve relative links
@@ -105,9 +108,18 @@ class ContactExtractor:
                         
                         href_lower = href.lower()
                         # Pick high-value contact pages
-                        if any(k in href_lower for k in ["contact", "about", "support", "hello", "reach", "info", "terms"]):
-                            if href not in visited and href.startswith(company.website):
-                                to_visit.append(href)
+                        if any(k in href_lower for k in ["contact", "touch", "contactus", "get-in-touch"]):
+                            priority_links.append(href)
+                        elif any(k in href_lower for k in ["about", "support", "hello", "reach", "info", "terms", "email", "address", "location"]):
+                            regular_links.append(href)
+
+                    # Prioritize contact pages at the front of queue
+                    for href in reversed(priority_links):
+                        if href not in visited and href.startswith(company.website) and href not in to_visit:
+                            to_visit.insert(0, href)
+                    for href in regular_links:
+                        if href not in visited and href.startswith(company.website) and href not in to_visit:
+                            to_visit.append(href)
 
             except Exception as e:
                 logger.error(f"Error crawling {current_url} for contacts: {e}")
