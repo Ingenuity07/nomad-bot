@@ -46,9 +46,11 @@ class AnalyzeScreenshotTool(BaseTool):
             with open(file_path, "rb") as image_file:
                 image_data = base64.b64encode(image_file.read()).decode("utf-8")
 
-            # Resolve Gemini API Key from environment (fallback to project secret)
-            api_key = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6Iv9rXDPDXtsa4xv69CfapI_zWl3uGCUe-n3qmzZ0xt4Q")
-            model = "gemini-2.5-flash"
+            # Resolve Gemini API Key from environment
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError("Gemini API key is required. Please set the GEMINI_API_KEY environment variable.")
+            model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
             payload = {

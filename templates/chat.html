@@ -3,20 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AIOS - Personal Agent</title>
+    <title>AIOS - V2 Workspace</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
 
         :root {
-            --bg-color: #0f172a;
-            --glass-bg: rgba(30, 41, 59, 0.7);
-            --glass-border: rgba(255, 255, 255, 0.1);
-            --primary: #3b82f6;
-            --primary-hover: #2563eb;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --user-msg: rgba(59, 130, 246, 0.2);
-            --ai-msg: rgba(255, 255, 255, 0.05);
+            --bg-color: #0b0f19;
+            --glass-bg: rgba(17, 24, 39, 0.7);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --primary: #8b5cf6;
+            --primary-hover: #7c3aed;
+            --secondary: #10b981;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --card-bg: rgba(31, 41, 55, 0.4);
+            --user-msg: rgba(139, 92, 246, 0.15);
+            --ai-msg: rgba(255, 255, 255, 0.03);
+            --border-highlight: rgba(139, 92, 246, 0.3);
         }
 
         * {
@@ -26,10 +29,10 @@
         }
 
         body {
-            font-family: 'Inter', sans-serif;
+            font-family: 'Outfit', sans-serif;
             background: var(--bg-color);
-            background-image: radial-gradient(circle at top right, #1e3a8a 0%, transparent 40%),
-                              radial-gradient(circle at bottom left, #312e81 0%, transparent 40%);
+            background-image: radial-gradient(circle at 10% 10%, #31106a 0%, transparent 45%),
+                              radial-gradient(circle at 90% 90%, #064e3b 0%, transparent 45%);
             color: var(--text-main);
             height: 100vh;
             display: flex;
@@ -38,44 +41,71 @@
             overflow: hidden;
         }
 
-        .chat-container {
-            width: 100%;
-            max-width: 900px;
+        .workspace-container {
+            width: 95vw;
+            max-width: 1400px;
             height: 90vh;
             background: var(--glass-bg);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             border: 1px solid var(--glass-border);
-            border-radius: 24px;
-            display: flex;
-            flex-direction: column;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            border-radius: 28px;
+            display: grid;
+            grid-template-columns: 1fr 1.2fr;
+            box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.6);
             overflow: hidden;
             animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
-        header {
-            padding: 24px;
-            border-bottom: 1px solid var(--glass-border);
+        /* Left Side: Chat Panel */
+        .chat-panel {
+            border-right: 1px solid var(--glass-border);
             display: flex;
-            align-items: center;
-            gap: 16px;
-            background: rgba(15, 23, 42, 0.4);
+            flex-direction: column;
+            height: 100%;
+            background: rgba(10, 15, 30, 0.3);
         }
 
-        header h1 {
-            font-size: 1.25rem;
-            font-weight: 600;
-            letter-spacing: -0.025em;
-            background: linear-gradient(to right, #60a5fa, #a78bfa);
+        .panel-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--glass-border);
+            background: rgba(15, 23, 42, 0.4);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-header h1 {
+            font-size: 1.35rem;
+            font-weight: 700;
+            background: linear-gradient(to right, #a78bfa, #60a5fa);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
 
-        header p {
-            font-size: 0.875rem;
+        .status-badge {
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            background: rgba(255, 255, 255, 0.08);
             color: var(--text-muted);
-            margin-top: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-badge.running {
+            background: rgba(139, 92, 246, 0.2);
+            color: #c084fc;
+        }
+
+        .status-badge.running span {
+            width: 6px;
+            height: 6px;
+            background: #c084fc;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
         }
 
         .chat-history {
@@ -88,20 +118,22 @@
             scroll-behavior: smooth;
         }
 
-        .chat-history::-webkit-scrollbar {
+        .chat-history::-webkit-scrollbar,
+        .stream-logs::-webkit-scrollbar {
             width: 6px;
         }
 
-        .chat-history::-webkit-scrollbar-thumb {
+        .chat-history::-webkit-scrollbar-thumb,
+        .stream-logs::-webkit-scrollbar-thumb {
             background: var(--glass-border);
             border-radius: 10px;
         }
 
         .message {
-            max-width: 80%;
+            max-width: 85%;
             padding: 16px 20px;
             border-radius: 20px;
-            line-height: 1.5;
+            line-height: 1.6;
             font-size: 0.95rem;
             animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
             opacity: 0;
@@ -111,7 +143,7 @@
         .message.user {
             align-self: flex-end;
             background: var(--user-msg);
-            border: 1px solid rgba(59, 130, 246, 0.3);
+            border: 1px solid rgba(139, 92, 246, 0.25);
             border-bottom-right-radius: 4px;
         }
 
@@ -123,7 +155,7 @@
         }
 
         .message p {
-            margin-bottom: 10px;
+            margin-bottom: 8px;
         }
         .message p:last-child {
             margin-bottom: 0;
@@ -138,25 +170,24 @@
         form {
             display: flex;
             gap: 12px;
-            position: relative;
         }
 
         input[type="text"] {
             flex: 1;
-            padding: 18px 24px;
+            padding: 16px 24px;
             background: rgba(255, 255, 255, 0.03);
             border: 1px solid var(--glass-border);
             border-radius: 9999px;
             color: var(--text-main);
-            font-size: 1rem;
+            font-size: 0.95rem;
             outline: none;
             transition: all 0.3s ease;
         }
 
         input[type="text"]:focus {
-            background: rgba(255, 255, 255, 0.07);
+            background: rgba(255, 255, 255, 0.06);
             border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+            box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.25);
         }
 
         button {
@@ -165,96 +196,324 @@
             color: white;
             border: none;
             border-radius: 9999px;
-            font-size: 1rem;
+            font-size: 0.95rem;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.3s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
         }
 
         button:hover {
             background: var(--primary-hover);
-            transform: scale(1.05);
+            transform: scale(1.03);
         }
 
         button:active {
-            transform: scale(0.95);
+            transform: scale(0.97);
         }
 
-        .typing-indicator {
-            align-self: flex-start;
-            display: none;
-            gap: 4px;
-            padding: 16px 20px;
-            background: var(--ai-msg);
-            border-radius: 20px;
-            border-bottom-left-radius: 4px;
+        /* Right Side: Execution Stream Panel */
+        .execution-panel {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            background: rgba(17, 24, 39, 0.2);
         }
 
-        .typing-indicator span {
+        .stream-title {
+            padding: 24px;
+            border-bottom: 1px solid var(--glass-border);
+            background: rgba(15, 23, 42, 0.4);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .stream-title h2 {
+            font-size: 1.15rem;
+            font-weight: 600;
+        }
+
+        .pulse-dot {
             width: 8px;
             height: 8px;
-            background: var(--text-muted);
+            background: var(--secondary);
             border-radius: 50%;
-            animation: bounce 1.4s infinite ease-in-out both;
+            animation: pulse 1.5s infinite;
+            display: none;
         }
 
-        .typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
-        .typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+        .stream-content {
+            flex: 1;
+            padding: 24px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
 
-        @keyframes slideUp {
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+        /* Plan Steps List */
+        .plan-box {
+            background: var(--card-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 16px;
+            padding: 20px;
+            display: none;
+        }
+
+        .plan-box h3 {
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+
+        .steps-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .step-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            padding: 6px 0;
+            transition: all 0.3s ease;
+        }
+
+        .step-item.active {
+            color: var(--text-main);
+            font-weight: 500;
+        }
+
+        .step-item.completed {
+            color: var(--secondary);
+        }
+
+        .step-icon {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            border: 2px solid var(--glass-border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+        }
+
+        .step-item.active .step-icon {
+            border-color: var(--primary);
+            background: var(--primary);
+            color: white;
+            animation: pulse 1.5s infinite;
+        }
+
+        .step-item.completed .step-icon {
+            border-color: var(--secondary);
+            background: var(--secondary);
+            color: white;
+        }
+
+        /* Tool Execution Card */
+        .tool-card {
+            background: rgba(17, 24, 39, 0.85);
+            border: 1px solid var(--glass-border);
+            border-radius: 16px;
+            overflow: hidden;
+            animation: slideUp 0.3s ease-out;
+        }
+
+        .tool-header {
+            padding: 12px 16px;
+            background: rgba(255, 255, 255, 0.04);
+            border-bottom: 1px solid var(--glass-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .tool-name {
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem;
+            color: #c084fc;
+            font-weight: 600;
+        }
+
+        .tool-status {
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .tool-status.success { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+        .tool-status.error { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+
+        .tool-body {
+            padding: 16px;
+        }
+
+        .tool-body p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .tool-args, .tool-result {
+            font-family: 'Fira Code', monospace;
+            font-size: 0.8rem;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 10px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            color: #a7f3d0;
+        }
+
+        .tool-result {
+            color: #cbd5e1;
+            margin-top: 8px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        /* Human Approval Card */
+        .approval-card {
+            background: rgba(30, 27, 75, 0.5);
+            border: 1px solid rgba(139, 92, 246, 0.4);
+            border-radius: 16px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            animation: blinkBorder 2s infinite;
+        }
+
+        .approval-header h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #d8b4fe;
+        }
+
+        .approval-body p {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+
+        .approval-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .btn-approve {
+            background: var(--secondary);
+            padding: 12px 24px;
+            border-radius: 9999px;
+            color: white;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            flex: 1;
+            transition: all 0.3s;
+        }
+
+        .btn-approve:hover { background: #059669; }
+
+        .btn-reject {
+            background: #dc2626;
+            padding: 12px 24px;
+            border-radius: 9999px;
+            color: white;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            flex: 1;
+            transition: all 0.3;
+        }
+
+        .btn-reject:hover { background: #b91c1c; }
+
+        /* Stream logs */
+        .stream-logs {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            padding-bottom: 24px;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.5; }
+        }
+
+        @keyframes blinkBorder {
+            0%, 100% { border-color: rgba(139, 92, 246, 0.4); }
+            50% { border-color: rgba(139, 92, 246, 0.9); }
         }
 
         @keyframes fadeIn {
-            from { opacity: 0; transform: scale(0.95); }
+            from { opacity: 0; transform: scale(0.97); }
             to { opacity: 1; transform: scale(1); }
         }
 
-        @keyframes bounce {
-            0%, 80%, 100% { transform: scale(0); }
-            40% { transform: scale(1); }
-        }
-
-        /* Responsive */
-        @media (max-width: 768px) {
-            .chat-container {
-                height: 100vh;
-                border-radius: 0;
-            }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(15px); }
+            to { opacity: 1; transform: translateY(0); }
         }
     </style>
 </head>
 <body>
 
-    <div class="chat-container">
-        <header>
-            <div>
+    <div class="workspace-container">
+        <!-- Left Pane: Chat Interface -->
+        <div class="chat-panel">
+            <div class="panel-header">
                 <h1>AIOS Core</h1>
-                <p>Powered by ResearchAgent & Gemini-2.5-Flash</p>
+                <div class="status-badge" id="statusBadge">
+                    <span></span>Ready
+                </div>
             </div>
-        </header>
 
-        <div class="chat-history" id="chatHistory">
-            <div class="message ai">
-                <p>Hello! I am your Personal AI Operating System. How can I help you today?</p>
+            <div class="chat-history" id="chatHistory">
+                <div class="message ai">
+                    <p>Hello! I am your Personal AI Operating System. Send a job search query or command to begin V2 execution.</p>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <form id="chatForm">
+                    <input type="text" id="messageInput" placeholder="Enter request (e.g. 'Search for remote python developer jobs')..." autocomplete="off" required>
+                    <button type="submit">Submit</button>
+                </form>
             </div>
         </div>
 
-        <div class="typing-indicator" id="typingIndicator">
-            <span></span><span></span><span></span>
-        </div>
+        <!-- Right Pane: Execution Stream Dashboard -->
+        <div class="execution-panel">
+            <div class="stream-title">
+                <div class="pulse-dot" id="pulseDot"></div>
+                <h2>Live Agent Workspace</h2>
+            </div>
 
-        <div class="input-area">
-            <form id="chatForm">
-                <input type="text" id="messageInput" placeholder="Ask me anything..." autocomplete="off" required>
-                <button type="submit">Send</button>
-            </form>
+            <div class="stream-content" id="streamContent">
+                <!-- Planning Step List -->
+                <div class="plan-box" id="planBox">
+                    <h3>Execution Plan</h3>
+                    <div class="steps-list" id="stepsList"></div>
+                </div>
+
+                <!-- Logs and Tool executions -->
+                <div class="stream-logs" id="streamLogs">
+                    <p style="color: var(--text-muted); font-size: 0.9rem; text-align: center; margin-top: 40px;" id="noLogsMsg">
+                        No active execution runs. Send a query to watch agent processes live.
+                    </p>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -262,15 +521,21 @@
         const chatForm = document.getElementById('chatForm');
         const messageInput = document.getElementById('messageInput');
         const chatHistory = document.getElementById('chatHistory');
-        const typingIndicator = document.getElementById('typingIndicator');
+        const statusBadge = document.getElementById('statusBadge');
         
-        let conversationId = null;
+        const pulseDot = document.getElementById('pulseDot');
+        const planBox = document.getElementById('planBox');
+        const stepsList = document.getElementById('stepsList');
+        const streamLogs = document.getElementById('streamLogs');
+        const noLogsMsg = document.getElementById('noLogsMsg');
 
-        function addMessage(content, sender) {
+        let conversationId = null;
+        let socket = null;
+
+        function addChatMessage(content, sender) {
             const msgDiv = document.createElement('div');
             msgDiv.classList.add('message', sender);
             
-            // Simple markdown handling for bold and new lines
             const formattedContent = content
                 .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                 .replace(/\n/g, '<br>');
@@ -280,13 +545,184 @@
             chatHistory.scrollTop = chatHistory.scrollHeight;
         }
 
-        function showTyping(show) {
-            if (show) {
-                typingIndicator.style.display = 'flex';
-                chatHistory.appendChild(typingIndicator); // move to bottom
-                chatHistory.scrollTop = chatHistory.scrollHeight;
-            } else {
-                typingIndicator.style.display = 'none';
+        function setStatus(statusText, isRunning = false) {
+            statusBadge.innerHTML = isRunning ? `<span></span>${statusText}` : `${statusText}`;
+            statusBadge.className = 'status-badge' + (isRunning ? ' running' : '');
+            pulseDot.style.display = isRunning ? 'block' : 'none';
+        }
+
+        function connectWebSocket(convId) {
+            if (socket) {
+                socket.close();
+            }
+
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+            const wsUrl = `${wsProtocol}${window.location.host}/ws/chat/${convId}/`;
+            
+            console.log(`Connecting to WebSocket: ${wsUrl}`);
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                console.log("WebSocket connected.");
+                setStatus("Agent Running", true);
+                if (noLogsMsg) noLogsMsg.style.display = 'none';
+            };
+
+            socket.onmessage = (event) => {
+                const payload = JSON.parse(event.data);
+                const eventType = payload.event_type;
+                const data = payload.data;
+
+                console.log("WS Event:", eventType, data);
+                handleStreamEvent(eventType, data);
+            };
+
+            socket.onclose = () => {
+                console.log("WebSocket disconnected.");
+            };
+        }
+
+        function handleStreamEvent(eventType, data) {
+            if (eventType === 'planner_start') {
+                planBox.style.display = 'none';
+                stepsList.innerHTML = '';
+                appendLogMessage("Planner Node initialized thinking...");
+            }
+            else if (eventType === 'planner_plan') {
+                planBox.style.display = 'block';
+                stepsList.innerHTML = '';
+                data.plan.forEach((step, idx) => {
+                    const stepDiv = document.createElement('div');
+                    stepDiv.classList.add('step-item');
+                    stepDiv.id = `step-item-${idx}`;
+                    stepDiv.innerHTML = `
+                        <div class="step-icon">${idx + 1}</div>
+                        <span>${formatStepName(step)}</span>
+                    `;
+                    stepsList.appendChild(stepDiv);
+                });
+                appendLogMessage(data.message || "Planning complete.");
+            }
+            else if (eventType === 'executor_step_start') {
+                // Highlight current plan step
+                const idx = data.step_index;
+                const stepItems = stepsList.querySelectorAll('.step-item');
+                stepItems.forEach((item, i) => {
+                    if (i < idx) {
+                        item.className = 'step-item completed';
+                    } else if (i === idx) {
+                        item.className = 'step-item active';
+                    } else {
+                        item.className = 'step-item';
+                    }
+                });
+                setStatus(data.status || "Running step", true);
+                appendLogMessage(`Executing Step: ${formatStepName(data.goal)}`);
+            }
+            else if (eventType === 'tool_execution') {
+                appendToolCard(data.tool_name, data.tool_args, data.tool_result, data.status);
+            }
+            else if (eventType === 'executor_step_end') {
+                appendLogMessage(`Finished Step: ${formatStepName(data.goal)}`);
+            }
+            else if (eventType === 'approval_requested') {
+                setStatus("Waiting Approval", false);
+                appendApprovalCard(data.message);
+            }
+            else if (eventType === 'run_completed') {
+                setStatus("Ready", false);
+                appendLogMessage("Workflow completed successfully!");
+            }
+        }
+
+        function formatStepName(name) {
+            return name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        }
+
+        function appendLogMessage(msg) {
+            if (noLogsMsg) noLogsMsg.style.display = 'none';
+            const logP = document.createElement('p');
+            logP.style.fontSize = '0.85rem';
+            logP.style.color = 'var(--text-muted)';
+            logP.style.borderLeft = '2px solid var(--primary)';
+            logP.style.paddingLeft = '10px';
+            logP.style.margin = '10px 0';
+            logP.innerHTML = `[System] ${msg}`;
+            streamLogs.appendChild(logP);
+            streamLogs.scrollTop = streamLogs.scrollHeight;
+        }
+
+        function appendToolCard(toolName, args, result, status) {
+            if (noLogsMsg) noLogsMsg.style.display = 'none';
+            const card = document.createElement('div');
+            card.className = 'tool-card';
+            card.innerHTML = `
+                <div class="tool-header">
+                    <span class="tool-name">call: ${toolName}()</span>
+                    <span class="tool-status ${status}">${status}</span>
+                </div>
+                <div class="tool-body">
+                    <p>Arguments:</p>
+                    <div class="tool-args">${JSON.stringify(args, null, 2)}</div>
+                    <p style="margin-top: 10px;">Execution Return:</p>
+                    <div class="tool-result">${result}</div>
+                </div>
+            `;
+            streamLogs.appendChild(card);
+            streamLogs.scrollTop = streamLogs.scrollHeight;
+        }
+
+        function appendApprovalCard(message) {
+            if (noLogsMsg) noLogsMsg.style.display = 'none';
+            const card = document.createElement('div');
+            card.className = 'approval-card';
+            card.id = 'activeApprovalCard';
+            card.innerHTML = `
+                <div class="approval-header">
+                    <h3>Approval Gate Triggered</h3>
+                </div>
+                <div class="approval-body">
+                    <p>${message}</p>
+                </div>
+                <div class="approval-actions">
+                    <button class="btn-approve" onclick="submitApproval(true)">Approve & Submit</button>
+                    <button class="btn-reject" onclick="submitApproval(false)">Reject</button>
+                </div>
+            `;
+            streamLogs.appendChild(card);
+            streamLogs.scrollTop = streamLogs.scrollHeight;
+        }
+
+        async function submitApproval(approved) {
+            const card = document.getElementById('activeApprovalCard');
+            if (card) {
+                card.remove();
+            }
+            appendLogMessage(`Sending human approval decision: ${approved ? 'APPROVED' : 'REJECTED'}`);
+            setStatus("Agent Resumed", true);
+            
+            try {
+                const response = await fetch('/api/chat/approve/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        conversation_id: conversationId,
+                        approved: approved
+                    })
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    appendLogMessage(`Approval response: ${data.message || "Resumed"}`);
+                } else {
+                    appendLogMessage(`Failed to submit approval: ${data.error || "Server error"}`);
+                    setStatus("Error", false);
+                }
+            } catch (err) {
+                appendLogMessage(`Failed to connect to approval endpoint: ${err.message}`);
+                setStatus("Error", false);
             }
         }
 
@@ -295,16 +731,19 @@
             const text = messageInput.value.trim();
             if (!text) return;
 
-            addMessage(text, 'user');
+            addChatMessage(text, 'user');
             messageInput.value = '';
-            showTyping(true);
+            setStatus("Starting execution...", true);
+
+            // Clean stream logs for a fresh execution flow
+            if (noLogsMsg) noLogsMsg.style.display = 'none';
+            streamLogs.innerHTML = '';
 
             try {
                 const response = await fetch('/api/chat/', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'X-CSRFToken': getCookie('csrftoken') // Fetch CSRF if needed, but DRF might allow simple POST based on config
                     },
                     body: JSON.stringify({
                         message: text,
@@ -313,38 +752,27 @@
                 });
 
                 const data = await response.json();
-                
-                showTyping(false);
 
                 if (response.ok) {
                     conversationId = data.conversation_id;
-                    addMessage(data.response, 'ai');
+                    
+                    // Establish WebSockets stream dynamically for this conversation session!
+                    connectWebSocket(conversationId);
+
+                    // Note: In Celery mode, the view returns immediately. The final AI response will update asynchronously.
+                    if (data.response) {
+                        addChatMessage(data.response, 'ai');
+                    }
                 } else {
-                    addMessage("Sorry, I encountered an error. Please check the server logs.", 'ai');
-                    console.error("API Error:", data);
+                    addChatMessage("Sorry, I encountered an error. Please check the server logs.", 'ai');
+                    setStatus("Error", false);
                 }
             } catch (err) {
-                showTyping(false);
-                addMessage("Network error. Make sure the Django server is running.", 'ai');
+                addChatMessage("Network error. Make sure the Django server is running.", 'ai');
                 console.error("Network Error:", err);
+                setStatus("Error", false);
             }
         });
-
-        // Helper for Django CSRF
-        function getCookie(name) {
-            let cookieValue = null;
-            if (document.cookie && document.cookie !== '') {
-                const cookies = document.cookie.split(';');
-                for (let i = 0; i < cookies.length; i++) {
-                    const cookie = cookies[i].trim();
-                    if (cookie.substring(0, name.length + 1) === (name + '=')) {
-                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
-                        break;
-                    }
-                }
-            }
-            return cookieValue;
-        }
     </script>
 </body>
 </html>

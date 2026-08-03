@@ -46,6 +46,11 @@ We are building a **Modular Monolith** using Clean Architecture / DDD patterns:
 * Implement asynchronous tasks via Celery and RabbitMQ/Redis.
 * Set up Celery Beat schedules to poll for job opportunities and trigger background application agents autonomously.
 
+### Phase 8: V2 Durable Agent Foundation (LangGraph, Checkpointing, Memory, Planner-Executor)
+* **Step 8: Environment & Durable Checkpointing:** Add LangGraph dependencies. Develop custom `DjangoCheckpointSaver` to store execution graph states in Django DB.
+* **Step 9: Planner-Executor Workflow Graph:** Implement LangGraph `StateGraph` with a Planner node (generating structured JSON execution plan) and Executor node (executing registered tools). Integrate Human-in-the-Loop approval nodes.
+* **Step 10: Memory Layer & API Resumption:** Implement `AgentMemory` DB models for preference storage. Add pre-run Memory injection and post-run Memory extraction nodes. Implement `/api/chat/approve/` API to resume suspended graphs.
+
 ---
 
 ## 3. General Guidelines

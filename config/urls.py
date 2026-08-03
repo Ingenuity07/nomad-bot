@@ -21,5 +21,6 @@ from django.views.generic import TemplateView
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('api.urls')),
+    path('api/v3/', include('api.v3_urls')),
     path('', TemplateView.as_view(template_name='chat.html'), name='chat_ui'),
 ]

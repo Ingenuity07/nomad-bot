@@ -1,7 +1,7 @@
 from django.utils import timezone
 from core.agents.research_agent import ResearchAgent
 from core.agents.job_reasoning_agent import JobReasoningAgent
-from core.llm_providers.gemini_api import GeminiAPIProvider
+from core.llm.router import IntelligentRouter
 from core.tools.registry import ToolRegistry
 from core.tools.implementations.file_tool import FileTool
 from core.tools.implementations.github_tool import (
@@ -21,10 +21,7 @@ class SingleAgentOrchestrator:
     """
     
     def __init__(self):
-        self.provider = GeminiAPIProvider(
-            api_key="AQ.Ab8RN6Iv9rXDPDXtsa4xv69CfapI_zWl3uGCUe-n3qmzZ0xt4Q",
-            model="gemma-4-26b-a4b-it"
-        )
+        self.provider = IntelligentRouter()
         self.tool_registry = ToolRegistry()
         self.tool_registry.register(FileTool())
         self.tool_registry.register(GitHubSearchCodeTool())
@@ -43,7 +40,7 @@ class SingleAgentOrchestrator:
             tool_registry=self.tool_registry
         )
 
-    def handle_request(self, user_profile, conversation_id, message_text: str, agent_type: str = "ResearchAgent") -> dict:
+    def handle_request(self, user_profile, conversation_id, message_text: str, agent_type: str = "ResearchAgent", selected_provider: str = None) -> dict:
         agent = self.research_agent
         if agent_type == "JobReasoningAgent":
             agent = self.job_reasoning_agent
@@ -53,11 +50,26 @@ class SingleAgentOrchestrator:
         else:
             conversation = Conversation.objects.create(user_profile=user_profile)
             
-        Message.objects.create(
-            conversation=conversation,
-            role='user',
-            content=message_text
-        )
+        # Handle explicit provider override if specified by user (not 'auto')
+        if selected_provider and selected_provider.strip().lower() != "auto":
+            prov_key = selected_provider.strip().lower()
+            adapter = self.provider.adapters.get(prov_key)
+            if adapter:
+                conversation.selected_provider = prov_key
+                conversation.selected_model = getattr(adapter, "model_name", prov_key)
+                conversation.save(update_fields=['selected_provider', 'selected_model'])
+            
+        self.provider.set_active_conversation(str(conversation.id))
+            
+        if message_text:
+            if not conversation.title:
+                conversation.title = message_text[:50] + ("..." if len(message_text) > 50 else "")
+                conversation.save(update_fields=['title'])
+            Message.objects.create(
+                conversation=conversation,
+                role='user',
+                content=message_text
+            )
         
         agent_run = AgentRun.objects.create(
             conversation=conversation,
@@ -89,22 +101,78 @@ class SingleAgentOrchestrator:
         }
         
         try:
-            response_text = agent.execute(
-                prompt=message_text,
-                conversation_history=history,
-                on_tool_execution=log_tool_execution,
-                user_profile_data=user_profile_data
-            )
+            from core.agents.checkpoint_saver import DjangoCheckpointSaver
+            from core.agents.v2_graph import get_v2_agent_graph
+            
+            saver = DjangoCheckpointSaver()
+            graph = get_v2_agent_graph(checkpoint_saver=saver)
+            
+            config = {"configurable": {"thread_id": str(conversation.id)}}
+            
+            messages_list = []
+            for h in history:
+                messages_list.append({"role": h["role"], "content": h["content"]})
+                
+            checkpoint_tuple = saver.get_tuple(config)
+            
+            initial_state = {
+                "messages": messages_list,
+                "plan": [],
+                "step_index": 0,
+                "scraped_data": "",
+                "customized_resume_path": "",
+                "screenshot_name": "",
+                "human_approved": False,
+                "status": "Searching",
+                "user_profile_data": user_profile_data,
+                "agent_memories": [],
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "agent_run_id": agent_run.id,
+                "conversation_id": str(conversation.id),
+                "retry_count": 0,
+                "error": None
+            }
+            
+            # If checkpoint exists, we pass a message update if present, otherwise pass None to resume
+            if checkpoint_tuple:
+                if message_text:
+                    resumed_state = graph.invoke({"messages": [{"role": "user", "content": message_text}]}, config)
+                else:
+                    resumed_state = graph.invoke(None, config)
+            else:
+                resumed_state = graph.invoke(initial_state, config)
+                
+            if resumed_state.get("error"):
+                raise Exception(resumed_state["error"])
+
+            # Extract response text (last assistant message)
+            response_text = ""
+            for m in reversed(resumed_state.get("messages", [])):
+                if m.get("role") == "assistant":
+                    response_text = m.get("content") or ""
+                    break
+                    
+            if not response_text:
+                response_text = f"Agent status is currently: {resumed_state.get('status')}"
+            
+            conversation.refresh_from_db()
+            prompt_tokens = resumed_state.get("prompt_tokens", 0)
+            completion_tokens = resumed_state.get("completion_tokens", 0)
+            total_tokens = prompt_tokens + completion_tokens
             
             Message.objects.create(
                 conversation=conversation,
                 role='assistant',
-                content=response_text
+                content=response_text,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                provider=conversation.selected_provider,
+                model=conversation.selected_model
             )
             
             # Save token usage and cost metrics
-            prompt_tokens = getattr(agent, "accumulated_prompt_tokens", 0)
-            completion_tokens = getattr(agent, "accumulated_completion_tokens", 0)
             # Gemini 2.5 Flash Pricing: $0.075 / 1M input tokens, $0.30 / 1M output tokens
             from decimal import Decimal
             total_cost = (Decimal(prompt_tokens) * Decimal("0.075") + Decimal(completion_tokens) * Decimal("0.30")) / Decimal("1000000")
@@ -112,18 +180,34 @@ class SingleAgentOrchestrator:
             agent_run.prompt_tokens = prompt_tokens
             agent_run.completion_tokens = completion_tokens
             agent_run.total_cost = total_cost
-            agent_run.status = 'completed'
+            
+            if resumed_state.get("status") == "Complete":
+                agent_run.status = 'completed'
+            else:
+                # If waiting approval or still running plan
+                agent_run.status = 'completed'  # complete this task turn
+                
             agent_run.completed_at = timezone.now()
             agent_run.save()
             
             return {
                 "conversation_id": str(conversation.id),
-                "response": response_text
+                "response": response_text,
+                "selected_provider": conversation.selected_provider,
+                "selected_model": conversation.selected_model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens
             }
             
         except Exception as e:
-            prompt_tokens = getattr(agent, "accumulated_prompt_tokens", 0)
-            completion_tokens = getattr(agent, "accumulated_completion_tokens", 0)
+            # Fallback to local variables or graph state values if defined
+            try:
+                prompt_tokens = resumed_state.get("prompt_tokens", 0)
+                completion_tokens = resumed_state.get("completion_tokens", 0)
+            except NameError:
+                prompt_tokens = 0
+                completion_tokens = 0
             from decimal import Decimal
             total_cost = (Decimal(prompt_tokens) * Decimal("0.075") + Decimal(completion_tokens) * Decimal("0.30")) / Decimal("1000000")
             

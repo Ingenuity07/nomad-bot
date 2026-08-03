@@ -40,16 +40,21 @@ class GeminiCLIProvider(BaseLLMProvider):
                 else:
                     parsed_output = json.loads(output)
 
-                if 'tool_name' in parsed_output:
+                if isinstance(parsed_output, dict) and 'tool_name' in parsed_output:
                     return {
                         "type": "tool_call",
                         "tool_name": parsed_output["tool_name"],
                         "tool_args": parsed_output.get("tool_args", {})
                     }
-                else:
+                elif isinstance(parsed_output, dict):
                     return {
                         "type": "text",
                         "text": parsed_output.get("response", output)
+                    }
+                else:
+                    return {
+                        "type": "text",
+                        "text": output
                     }
             except json.JSONDecodeError:
                 return {
