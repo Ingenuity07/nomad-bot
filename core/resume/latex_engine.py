@@ -145,8 +145,10 @@ class LaTeXEngine:
         os.makedirs(output_dir, exist_ok=True)
         
         file_id = str(uuid.uuid4())[:8]
-        tex_path = os.path.join(output_dir, f"resume_{file_id}.tex")
-        pdf_path = os.path.join(output_dir, f"resume_{file_id}.pdf")
+        tex_filename = f"resume_{file_id}.tex"
+        pdf_filename = f"resume_{file_id}.pdf"
+        tex_path = os.path.join(output_dir, tex_filename)
+        pdf_path = os.path.join(output_dir, pdf_filename)
         
         with open(tex_path, "w", encoding="utf-8") as f:
             f.write(latex_code)
@@ -154,15 +156,25 @@ class LaTeXEngine:
         # Try compiling with tectonic / pdflatex if installed, otherwise create text fallback PDF
         import subprocess
         try:
-            cmd = ["tectonic", tex_path, "-o", output_dir]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Pass only the filename since we run in the output_dir context
+            cmd = ["tectonic", tex_filename, "-o", "."]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=output_dir)
         except Exception:
             try:
-                cmd = ["pdflatex", "-interaction=nonstopmode", f"-output-directory={output_dir}", tex_path]
-                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                cmd = ["pdflatex", "-interaction=nonstopmode", f"-output-directory=.", tex_filename]
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=output_dir)
             except Exception:
                 # Pure python PDF generation fallback using text write if no TeX compiler on system
                 with open(pdf_path, "w", encoding="utf-8") as f:
                     f.write(latex_code)
+
+        # Clean up LaTeX intermediate files to avoid workspace clutter
+        for ext in [".aux", ".log", ".out", ".fls", ".fdb_latexmk", ".toc"]:
+            temp_aux = os.path.join(output_dir, f"resume_{file_id}{ext}")
+            if os.path.exists(temp_aux):
+                try:
+                    os.remove(temp_aux)
+                except Exception:
+                    pass
 
         return pdf_path

@@ -60,6 +60,15 @@ function App() {
   const [tailoredResult, setTailoredResult] = useState<any>(null);
   const [activeLatexView, setActiveLatexView] = useState<'preview' | 'latex'>('preview');
 
+  // Resume Template States
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [selectedTemplateName, setSelectedTemplateName] = useState('modern');
+  const [newTemplateName, setNewTemplateName] = useState('');
+  const [newTemplateSource, setNewTemplateSource] = useState('');
+  const [newTemplateFile, setNewTemplateFile] = useState<File | null>(null);
+  const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
+  const [showUploadTemplateCard, setShowUploadTemplateCard] = useState(false);
+
   // Versions & Applications V3 state
   const [resumeVersions, setResumeVersions] = useState<any[]>([]);
   const [applications, setApplications] = useState<any[]>([]);
@@ -252,12 +261,63 @@ function App() {
     }
   };
 
+  const fetchTemplates = async () => {
+    try {
+      const res = await axios.get('http://localhost:8000/api/v3/resumes/templates/');
+      setTemplates(res.data);
+    } catch (err) {
+      console.error("Failed to load templates:", err);
+    }
+  };
+
+  const handleUploadTemplate = async () => {
+    if (!newTemplateName.trim()) {
+      alert("Template Name is required");
+      return;
+    }
+    if (!newTemplateSource.trim() && !newTemplateFile) {
+      alert("Please provide raw LaTeX source or upload a file (.tex or .pdf)");
+      return;
+    }
+
+    setIsUploadingTemplate(true);
+    try {
+      const formData = new FormData();
+      formData.append('name', newTemplateName);
+      if (newTemplateFile) {
+        formData.append('file', newTemplateFile);
+      } else {
+        formData.append('latex_source', newTemplateSource);
+      }
+
+      const res = await axios.post('http://localhost:8000/api/v3/resumes/templates/', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      });
+      alert(`Template "${res.data.name}" added successfully!`);
+      setNewTemplateName('');
+      setNewTemplateSource('');
+      setNewTemplateFile(null);
+      fetchTemplates();
+      setSelectedTemplateName(res.data.name);
+      setShowUploadTemplateCard(false);
+    } catch (err: any) {
+      console.error("Template upload error:", err);
+      const errMsg = err.response?.data?.error || "Failed to upload template.";
+      alert(errMsg);
+    } finally {
+      setIsUploadingTemplate(false);
+    }
+  };
+
   const handleTailorResume = async () => {
     if (!tailorJobText.trim()) return;
     setIsTailoring(true);
     try {
       const res = await axios.post('http://localhost:8000/api/v3/resumes/tailor/', {
-        job_text: tailorJobText
+        job_text: tailorJobText,
+        template_name: selectedTemplateName
       });
       setTailoredResult(res.data);
       fetchVersions();
@@ -354,6 +414,7 @@ function App() {
     fetchKnowledgeBase();
     fetchVersions();
     fetchApplications();
+    fetchTemplates();
   }, []);
 
   const handleSelectConversation = async (id: string) => {
@@ -1377,6 +1438,82 @@ function App() {
                 <FileText size={16} color="#6366f1" />
                 <span>Target Job Posting</span>
               </div>
+              
+              <div style={{ display: 'flex', gap: '10px', marginBottom: '15px', alignItems: 'flex-end' }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '5px' }}>Resume Style Template</label>
+                  <select 
+                    className="v3-input" 
+                    value={selectedTemplateName} 
+                    onChange={e => setSelectedTemplateName(e.target.value)}
+                    style={{ height: '38px', width: '100%' }}
+                  >
+                    <option value="modern">Modern (Default)</option>
+                    {templates.map(t => (
+                      <option key={t.id} value={t.name}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  className="v3-btn-subtle"
+                  onClick={() => setShowUploadTemplateCard(!showUploadTemplateCard)}
+                  style={{ height: '38px', minWidth: 'auto', padding: '0 15px' }}
+                >
+                  {showUploadTemplateCard ? 'Cancel' : '➕ Upload Template'}
+                </button>
+              </div>
+
+              {/* Upload Custom Template Section */}
+              {showUploadTemplateCard && (
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '15px', borderRadius: '6px', marginBottom: '20px', border: '1px dashed var(--border-color)' }}>
+                  <h4 style={{ margin: '0 0 10px 0', fontSize: '13px' }}>Upload Custom Template (.tex or .pdf)</h4>
+                  <div style={{ marginBottom: '10px' }}>
+                    <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '3px' }}>Template Name</label>
+                    <input 
+                      type="text" 
+                      className="v3-input"
+                      placeholder="e.g. Elegant, Compact, Minimal"
+                      value={newTemplateName}
+                      onChange={e => setNewTemplateName(e.target.value)}
+                      style={{ height: '32px' }}
+                    />
+                  </div>
+                  <div style={{ marginBottom: '10px' }}>
+                    <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '3px' }}>Upload File</label>
+                    <input 
+                      type="file" 
+                      accept=".tex,.pdf"
+                      onChange={e => setNewTemplateFile(e.target.files ? e.target.files[0] : null)}
+                      style={{ fontSize: '12px', display: 'block', margin: '5px 0' }}
+                    />
+                    <span style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                      Tip: If uploading a PDF, Nomad will translate it to a LaTeX template.
+                    </span>
+                  </div>
+                  <div style={{ marginBottom: '10px' }}>
+                    <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '3px' }}>Or Paste Raw LaTeX Jinja2 Source</label>
+                    <textarea 
+                      className="v3-textarea"
+                      rows={5}
+                      placeholder="Paste raw LaTeX with Jinja2 loops..."
+                      value={newTemplateSource}
+                      onChange={e => setNewTemplateSource(e.target.value)}
+                      disabled={!!newTemplateFile}
+                    />
+                  </div>
+                  <button 
+                    type="button" 
+                    className="v3-btn-primary" 
+                    onClick={handleUploadTemplate}
+                    disabled={isUploadingTemplate}
+                    style={{ width: '100%', height: '32px', fontSize: '12px' }}
+                  >
+                    {isUploadingTemplate ? 'Processing & Saving Template...' : 'Save Template'}
+                  </button>
+                </div>
+              )}
+
               <textarea 
                 className="v3-textarea"
                 rows={12}

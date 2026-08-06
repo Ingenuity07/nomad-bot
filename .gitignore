@@ -35,3 +35,9 @@ ENV/
 *.jpg
 *.jpeg
 *.log
+
+# Generated Media and Resumes
+media/
+*.aux
+*.out
+*.toc

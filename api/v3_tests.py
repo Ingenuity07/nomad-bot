@@ -259,5 +259,25 @@ class NomadV3EngineTestCase(TestCase):
         self.assertEqual(len(res_page.json()["leads"]), 1)
         self.assertEqual(res_page.json()["total_pages"], 2)
 
+    def test_resume_template_upload(self):
+        from memory.models import ResumeTemplate
+        # 1. Test get template list
+        response = self.client.get('/api/v3/resumes/templates/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 0)
+
+        # 2. Test create LaTeX template
+        response = self.client.post('/api/v3/resumes/templates/', {
+            "name": "Classic",
+            "latex_source": "hello {{ name }}"
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(ResumeTemplate.objects.filter(name="Classic").count(), 1)
+
+        # 3. Test list after creation
+        response = self.client.get('/api/v3/resumes/templates/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 1)
+
 
 
