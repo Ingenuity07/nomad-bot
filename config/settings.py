@@ -60,8 +60,12 @@ INSTALLED_APPS = [
     'rest_framework',
     'django_celery_beat',
     'channels',
-    'memory',
-    'api',
+    'llm',
+    'knowledge_base',
+    'prospecting',
+    'resume',
+    'applications',
+    'chat',
 ]
 
 MIDDLEWARE = [
