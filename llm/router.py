@@ -66,7 +66,21 @@ class IntelligentRouter(BaseLLMProvider):
         from llm.models import PromptRun
         
         start_time = time.time()
-        result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
+        result = {"type": "error", "text": "Timeout or failed call"}
+        
+        # Retry up to 3 times on rate limiting (429)
+        for attempt in range(3):
+            result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
+            if result.get("type") == "error":
+                err_text = result.get("text", "")
+                status_code = result.get("status_code", 500)
+                if "429" in err_text or "too many requests" in err_text.lower() or status_code == 429:
+                    wait_sec = (attempt + 1) * 3
+                    logger.warning(f"Provider '{provider_key}' returned 429 rate limit. Retrying in {wait_sec}s...")
+                    time.sleep(wait_sec)
+                    continue
+            break
+
         latency_ms = int((time.time() - start_time) * 1000)
         
         if result.get("type") != "error":
