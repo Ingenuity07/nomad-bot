@@ -17,6 +17,8 @@ venv/
 env/
 ENV/
 
+*.md
+
 # Databases (Local/SQLite development)
 *.db
 *.sqlite3
@@ -41,3 +43,12 @@ media/
 *.aux
 *.out
 *.toc
+
+# Celery Beat runtime schedule database
+celerybeat-schedule
+celerybeat-schedule.db
+
+# Project-specific caches and locks
+.freebuff/
+skills-lock.json
+model_waterfall_plan.txt
