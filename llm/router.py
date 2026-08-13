@@ -60,6 +60,49 @@ class IntelligentRouter(BaseLLMProvider):
             "critical": self._parse_fallback_env("ROUTER_FALLBACK_CRITICAL", default_critical)
         }
 
+    def _generate_with_logging(self, provider_key: str, adapter: Any, prompt: str, system_prompt: str, tools: list) -> Dict[str, Any]:
+        import time
+        import json
+        from llm.models import PromptRun
+        
+        start_time = time.time()
+        result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
+        latency_ms = int((time.time() - start_time) * 1000)
+        
+        if result.get("type") != "error":
+            input_tokens = result.get("prompt_tokens") or 0
+            output_tokens = result.get("completion_tokens") or 0
+            total_tokens = result.get("total_tokens") or (input_tokens + output_tokens)
+            model_name = getattr(adapter, "model_name", provider_key)
+            
+            # Expected price based on current market rates per 1M tokens
+            cost_usd = 0.0
+            m = model_name.lower()
+            if "gemini" in m:
+                cost_usd = (input_tokens / 1_000_000) * 0.075 + (output_tokens / 1_000_000) * 0.30
+            elif "mixtral" in m:
+                cost_usd = ((input_tokens + output_tokens) / 1_000_000) * 0.24
+            elif "llama3.1-8b" in m or "cerebras" in m:
+                cost_usd = ((input_tokens + output_tokens) / 1_000_000) * 0.10
+                
+            try:
+                PromptRun.objects.create(
+                    purpose="prospecting_run",
+                    prompt_text=prompt,
+                    response_text=result.get("text", "") if result.get("type") == "text" else json.dumps(result),
+                    model_name=model_name,
+                    temperature=0.0,
+                    tokens_used=total_tokens,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost_usd,
+                    latency_ms=latency_ms
+                )
+            except Exception as db_err:
+                logger.error(f"Failed to save PromptRun log: {db_err}")
+                
+        return result
+
     def set_active_conversation(self, conversation_id: str):
         """Set the active conversation ID on thread-local storage."""
         self._thread_local.conversation_id = conversation_id
@@ -89,7 +132,7 @@ class IntelligentRouter(BaseLLMProvider):
             if self.health_monitor.is_healthy(locked_provider):
                 adapter = self.adapters.get(locked_provider)
                 if adapter:
-                    result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
+                    result = self._generate_with_logging(locked_provider, adapter, prompt, system_prompt, tools)
                     if result.get("type") != "error":
                         self.health_monitor.report_success(locked_provider)
                         result["provider"] = locked_provider
@@ -121,7 +164,7 @@ class IntelligentRouter(BaseLLMProvider):
                     continue
                 
                 logger.info(f"Attempting fallback to provider '{provider}' for conversation {conversation_id}")
-                result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
+                result = self._generate_with_logging(provider, adapter, prompt, system_prompt, tools)
                 if result.get("type") != "error":
                     self.health_monitor.report_success(provider)
                     result["provider"] = provider
@@ -159,7 +202,7 @@ class IntelligentRouter(BaseLLMProvider):
                 continue
                 
             logger.info(f"Routing request to provider '{provider}'")
-            result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
+            result = self._generate_with_logging(provider, adapter, prompt, system_prompt, tools)
             
             if result.get("type") != "error":
                 self.health_monitor.report_success(provider)

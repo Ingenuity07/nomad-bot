@@ -129,9 +129,11 @@ class SearchProvider(BusinessDiscoveryProvider):
 
         try:
             res = requests.get(ddg_url, headers=headers, timeout=8)
+            logger.info(f"DuckDuckGo HTTP response code: {res.status_code} for query: {query}")
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
                 links = soup.find_all("a", class_="result__a")
+                logger.info(f"DuckDuckGo search parsed {len(links)} result link elements.")
                 for link in links[:5]:
                     title = link.text.strip()
                     raw_href = link.get("href", "")

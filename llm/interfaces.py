@@ -42,7 +42,6 @@ class OpenAICompatibleAdapter(RouterLLMProvider):
         payload = {
             "model": self.model_name,
             "messages": messages,
-            "response_format": {"type": "json_object"}
         }
 
         try:

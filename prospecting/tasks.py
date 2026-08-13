@@ -95,8 +95,32 @@ def discover_campaign_async(run_id: str):
             f"Searching target directory using {provider_name}..."
         )
 
+        # Optimize query keyword using LLM if it looks like a long description/paragraph
+        search_keyword = run.keyword
+        words = search_keyword.split()
+        if len(words) > 4 or any(w in search_keyword.lower() for w in ["app", "built", "helps", "business", "finding", "routing", "optimis"]):
+            try:
+                from llm.router import IntelligentRouter
+                import json
+                router = IntelligentRouter()
+                prompt = (
+                    "Extract 1 to 2 clean, short, standard business categories or search keywords (e.g., 'courier', 'logistics', 'delivery service') "
+                    "from the following product or business pain point description:\n\n"
+                    f"\"{search_keyword}\"\n\n"
+                    "Return a JSON object with a single key 'keywords' containing a list of strings."
+                )
+                res = router.generate(prompt, system_prompt="You are a helpful keyword extraction assistant. Respond in raw JSON.")
+                if res.get("type") == "text":
+                    parsed = json.loads(res.get("text", "{}"))
+                    extracted = parsed.get("keywords", [])
+                    if extracted:
+                        search_keyword = extracted[0]
+                        logger.info(f"LLM optimized search keyword: '{search_keyword}' (original: '{run.keyword}')")
+            except Exception as llm_err:
+                logger.error(f"Failed to optimize search keyword using LLM: {llm_err}")
+
         provider = discovery_provider_registry.get(provider_name)
-        req = DiscoveryRequest(query=run.keyword, location=run.location, limit=20)
+        req = DiscoveryRequest(query=search_keyword, location=run.location, limit=20)
         
         # Execute query
         result = provider.search(req)
