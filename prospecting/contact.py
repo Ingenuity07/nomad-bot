@@ -61,8 +61,8 @@ class ContactExtractor:
                         found_emails.add(email_clean)
                         contact = LeadContact.objects.create(
                             company=company,
-                            email=email_clean,
-                            source=current_url
+                            email=email_clean[:255],
+                            source=current_url[:2000]
                         )
                         discovered.append(contact)
 
@@ -89,9 +89,9 @@ class ContactExtractor:
                             contact = LeadContact.objects.create(
                                 company=company,
                                 email="linkedin@placeholder.com",
-                                linkedin=li_url,
+                                linkedin=li_url[:2000],
                                 role="Company Page",
-                                source=current_url
+                                source=current_url[:2000]
                             )
                             discovered.append(contact)
 

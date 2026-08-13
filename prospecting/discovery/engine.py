@@ -73,11 +73,11 @@ class BusinessDiscoveryEngine:
 
             LeadCompany.objects.create(
                 discovery_run=discovery_run,
-                name=company["name"],
-                website=company["website"] or None,
-                phone=company["phone"] or None,
+                name=company["name"][:255] if company["name"] else "Unknown",
+                website=company["website"][:2000] if company["website"] else None,
+                phone=company["phone"][:100] if company["phone"] else None,
                 address=company["address"] or None,
-                category=company["category"] or None
+                category=company["category"][:100] if company["category"] else None
             )
 
         return unique_companies

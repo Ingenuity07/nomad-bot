@@ -1,0 +1,159 @@
+from rest_framework import serializers
+from prospecting.models import (
+    ProblemSignal, LeadCompany, Evidence, CompanySignal, 
+    Person, ContactPoint, BuyingGroupMember, TargetList, 
+    CampaignEnrollment, SalesGuidance, EmailSequence, EmailMessage, 
+    EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback, CRMIntegrationRecord
+)
+
+class ProblemSignalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProblemSignal
+        fields = [
+            'id', 'name', 'category', 'description', 
+            'signal_type', 'detection_method', 'weight', 
+            'active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class LeadCompanySerializer(serializers.ModelSerializer):
+    lead_score = serializers.SerializerMethodField()
+    fit_class = serializers.SerializerMethodField()
+    buying_window_class = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LeadCompany
+        fields = [
+            'id', 'name', 'website', 'phone', 'address', 'category', 'rating',
+            'lead_score', 'fit_class', 'buying_window_class', 'created_at'
+          ]
+
+    def get_lead_score(self, obj):
+        # Fetch from latest qualification or website analysis
+        qual = obj.qualifications.order_by('-analysis_version').first()
+        if qual:
+            return float(qual.overall_score)
+        analysis = getattr(obj, 'analysis', None)
+        if analysis:
+            return float(analysis.lead_score)
+        return 0.0
+
+    def get_fit_class(self, obj):
+        qual = obj.qualifications.order_by('-analysis_version').first()
+        if qual:
+            return qual.fit_class
+        return "UNKNOWN"
+
+    def get_buying_window_class(self, obj):
+        qual = obj.qualifications.order_by('-analysis_version').first()
+        if qual:
+            return qual.buying_window_class
+        return "UNKNOWN"
+
+
+class EvidenceSerializer(serializers.ModelSerializer):
+    signal_name = serializers.CharField(source='signal.name', read_only=True)
+    class Meta:
+        model = Evidence
+        fields = [
+            'id', 'source_type', 'source_url', 'source_title', 
+            'evidence_text', 'confidence', 'signal_name', 'captured_at'
+        ]
+
+
+class CompanySignalSerializer(serializers.ModelSerializer):
+    signal_name = serializers.CharField(source='signal.name', read_only=True)
+    category = serializers.CharField(source='signal.category', read_only=True)
+    class Meta:
+        model = CompanySignal
+        fields = [
+            'id', 'signal_name', 'category', 'value', 'confidence', 
+            'status', 'first_detected_at', 'last_detected_at'
+        ]
+
+
+class ContactPointSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ContactPoint
+        fields = ['id', 'type', 'value', 'source', 'verification_status', 'confidence']
+
+
+class PersonSerializer(serializers.ModelSerializer):
+    contact_points = ContactPointSerializer(many=True, read_only=True)
+    class Meta:
+        model = Person
+        fields = ['id', 'name', 'first_name', 'last_name', 'title', 'linkedin_url', 'contact_points']
+
+
+class BuyingGroupMemberSerializer(serializers.ModelSerializer):
+    person = PersonSerializer(read_only=True)
+    class Meta:
+        model = BuyingGroupMember
+        fields = ['id', 'role_type', 'relevance_score', 'reason', 'person']
+
+
+class TargetListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TargetList
+        fields = ['id', 'name', 'is_smart', 'criteria', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class CampaignEnrollmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CampaignEnrollment
+        fields = ['id', 'campaign', 'company', 'status', 'enrolled_at', 'updated_at']
+        read_only_fields = ['id', 'enrolled_at', 'updated_at']
+
+
+class SalesGuidanceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SalesGuidance
+        fields = [
+            'id', 'company', 'campaign', 'person', 'talking_points', 
+            'recommended_angle', 'recommended_next_step', 'message_draft', 
+            'risks', 'unknowns', 'metadata', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_at']
+
+
+class EmailSequenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailSequence
+        fields = ['id', 'campaign', 'name', 'steps', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class EmailMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailMessage
+        fields = [
+            'id', 'sequence', 'company', 'recipient_email', 'subject', 
+            'body', 'is_approved', 'status', 'sent_at', 'created_at'
+        ]
+        read_only_fields = ['id', 'sent_at', 'created_at']
+
+
+class InboundReplySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InboundReply
+        fields = [
+            'id', 'email_message', 'reply_text', 'classification', 
+            'confidence', 'requires_review', 'received_at'
+        ]
+        read_only_fields = ['id', 'classification', 'confidence', 'requires_review', 'received_at']
+
+
+class LeadFeedbackSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LeadFeedback
+        fields = ['id', 'company', 'feedback_type', 'notes', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class CRMIntegrationRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CRMIntegrationRecord
+        fields = ['id', 'company', 'person', 'external_crm', 'external_id', 'synced_at']
+        read_only_fields = ['id', 'synced_at']

@@ -1,8 +1,44 @@
 from django.urls import path
-from .views import ProspectingDiscoverAPIView, ProspectingLeadsAPIView, ProspectingResetAPIView
+from .views import (
+    ProspectingDiscoverAPIView, ProspectingLeadsAPIView, ProspectingResetAPIView,
+    ProblemSignalListCreateAPIView, ProblemSignalDetailAPIView,
+    LeadDetailAPIView, LeadEvidenceAPIView, LeadSignalsAPIView,
+    LeadContactsAPIView, LeadBuyingGroupAPIView, LeadResearchAPIView,
+    LeadRefreshAPIView, LeadIntelligenceAPIView,
+    TargetListListCreateAPIView, TargetListDetailAPIView,
+    LeadSalesGuidanceAPIView, CampaignEnrollmentAPIView,
+    EmailSequenceListCreateAPIView, EmailMessageListCreateAPIView,
+    EmailMessageSendAPIView, InboundReplyListCreateAPIView,
+    LeadFeedbackAPIView, DashboardOverviewAPIView, DashboardSignalsAPIView,
+    DashboardFunnelAPIView, DashboardOpportunitiesAPIView, LeadCRMSyncAPIView
+)
 
 urlpatterns = [
     path('discover/', ProspectingDiscoverAPIView.as_view(), name='prospecting-discover'),
     path('leads/', ProspectingLeadsAPIView.as_view(), name='prospecting-leads'),
+    path('leads/<uuid:pk>/', LeadDetailAPIView.as_view(), name='lead-detail'),
+    path('leads/<uuid:pk>/evidence/', LeadEvidenceAPIView.as_view(), name='lead-evidence'),
+    path('leads/<uuid:pk>/signals/', LeadSignalsAPIView.as_view(), name='lead-signals'),
+    path('leads/<uuid:pk>/contacts/', LeadContactsAPIView.as_view(), name='lead-contacts'),
+    path('leads/<uuid:pk>/buying-group/', LeadBuyingGroupAPIView.as_view(), name='lead-buying-group'),
+    path('leads/<uuid:pk>/research/', LeadResearchAPIView.as_view(), name='lead-research'),
+    path('leads/<uuid:pk>/refresh/', LeadRefreshAPIView.as_view(), name='lead-refresh'),
+    path('leads/<uuid:pk>/intelligence/', LeadIntelligenceAPIView.as_view(), name='lead-intelligence'),
+    path('leads/<uuid:pk>/sales-guidance/', LeadSalesGuidanceAPIView.as_view(), name='lead-sales-guidance'),
+    path('leads/<uuid:pk>/feedback/', LeadFeedbackAPIView.as_view(), name='lead-feedback'),
+    path('leads/<uuid:pk>/sync-crm/', LeadCRMSyncAPIView.as_view(), name='lead-sync-crm'),
+    path('lists/', TargetListListCreateAPIView.as_view(), name='target-lists-list'),
+    path('lists/<uuid:pk>/', TargetListDetailAPIView.as_view(), name='target-lists-detail'),
+    path('campaigns/enrollments/', CampaignEnrollmentAPIView.as_view(), name='campaign-enrollments'),
+    path('emails/sequences/', EmailSequenceListCreateAPIView.as_view(), name='email-sequences-list'),
+    path('emails/messages/', EmailMessageListCreateAPIView.as_view(), name='email-messages-list'),
+    path('emails/messages/<uuid:pk>/send/', EmailMessageSendAPIView.as_view(), name='email-messages-send'),
+    path('emails/replies/', InboundReplyListCreateAPIView.as_view(), name='email-replies-list'),
+    path('dashboard/overview/', DashboardOverviewAPIView.as_view(), name='dashboard-overview'),
+    path('dashboard/signals/', DashboardSignalsAPIView.as_view(), name='dashboard-signals'),
+    path('dashboard/funnel/', DashboardFunnelAPIView.as_view(), name='dashboard-funnel'),
+    path('dashboard/opportunities/', DashboardOpportunitiesAPIView.as_view(), name='dashboard-opportunities'),
     path('reset/', ProspectingResetAPIView.as_view(), name='prospecting-reset'),
+    path('signals/', ProblemSignalListCreateAPIView.as_view(), name='prospecting-signals-list'),
+    path('signals/<uuid:pk>/', ProblemSignalDetailAPIView.as_view(), name='prospecting-signals-detail'),
 ]
