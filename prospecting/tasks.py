@@ -99,6 +99,7 @@ def discover_campaign_async(run_id: str):
         search_keyword = run.keyword
         words = search_keyword.split()
         if len(words) > 4 or any(w in search_keyword.lower() for w in ["app", "built", "helps", "business", "finding", "routing", "optimis"]):
+            logger.info(f"Optimizing search query with LLM: \"{run.keyword[:40]}...\"")
             try:
                 from llm.router import IntelligentRouter
                 import json
@@ -123,7 +124,9 @@ def discover_campaign_async(run_id: str):
         req = DiscoveryRequest(query=search_keyword, location=run.location, limit=20)
         
         # Execute query
+        logger.info(f"Running search for: \"{search_keyword}\" in \"{run.location}\" using provider \"{provider_name}\"...")
         result = provider.search(req)
+        logger.info(f"Discovered {len(result.results)} raw leads.")
 
         # 2. Entity Resolution & Deduplication
         broadcast_progress(run_id, "resolving", 40, "Deduplicating discovered leads...")
@@ -154,12 +157,14 @@ def discover_campaign_async(run_id: str):
 
         for idx, company in enumerate(leads_to_process):
             progress_pct = 40 + int((idx / max(total_to_enrich, 1)) * 50)
+            msg = f"Analyzing website and contacts for {company.name} ({idx + 1}/{total_to_enrich})..."
             broadcast_progress(
                 run_id,
                 "researching",
                 progress_pct,
-                f"Analyzing website and contacts for {company.name} ({idx + 1}/{total_to_enrich})..."
+                msg
             )
+            logger.info(msg)
             try:
                 # Extract contacts and analyze website
                 ContactExtractor.extract_contacts(company)
