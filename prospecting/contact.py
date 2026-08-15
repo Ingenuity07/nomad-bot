@@ -1,18 +1,10 @@
-import re
 import logging
-import requests
-from bs4 import BeautifulSoup
 from prospecting.models import LeadCompany, LeadContact
 
 logger = logging.getLogger(__name__)
 
-# Standard emails, phone numbers, and LinkedIn regexes
-EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
-PHONE_REGEX = re.compile(r'(?:\+?44\s?(?:\d{3,4}\s?\d{3,4}|\(\d{3,4}\)\s?\d{3,4})|\b0\d{2,4}\s?\d{5,8}\b)')
-LINKEDIN_REGEX = re.compile(r'https?://(?:www\.)?linkedin\.com/(?:in|company)/[a-zA-Z0-9_-]+')
-
 class ContactExtractor:
-    """Crawls business sites to extract emails, phone numbers, and social links."""
+    """Crawls business sites to extract emails, phone numbers, and social links using the Tool Platform."""
 
     @staticmethod
     def extract_contacts(company: LeadCompany) -> list:
@@ -21,107 +13,78 @@ class ContactExtractor:
             return []
 
         discovered = []
-        visited = set()
-        to_visit = [company.website]
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        from llm.tools.registry import ToolRegistry
+        from llm.tools.executor import ToolExecutor
+        from llm.tools.context import ToolContext
+        from chat.orchestrator.single_agent import SingleAgentOrchestrator
 
-        # Keep track of unique findings to prevent DB duplicates
-        found_emails = set()
-        found_phones = set()
-        found_linkedins = set()
+        orchestrator = SingleAgentOrchestrator()
+        executor = ToolExecutor(orchestrator.tool_registry)
+        context = ToolContext(source="workflow")
 
-        # Crawl homepage and up to 7 key subpages
-        pages_limit = 8
-        pages_visited = 0
+        logger.info(f"Crawling website via CrawlWebsiteTool: {company.website}")
+        crawl_res = executor.execute(
+            "crawl_website",
+            {
+                "url": company.website,
+                "max_pages": 5,
+                "timeout_seconds": 30
+            },
+            context=context
+        )
 
-        while to_visit and pages_visited < pages_limit:
-            current_url = to_visit.pop(0)
-            if current_url in visited:
-                continue
+        all_text = ""
+        if crawl_res.success and crawl_res.data:
+            for page in crawl_res.data.get("pages", []):
+                all_text += page.get("text", "") + "\n"
+
+        if not all_text.strip():
+            return []
+
+        logger.info("Parsing contact details via ExtractContactDataTool")
+        extract_res = executor.execute(
+            "extract_contact_data",
+            {
+                "text": all_text,
+                "source_url": company.website
+            },
+            context=context
+        )
+
+        if extract_res.success and extract_res.data:
+            data = extract_res.data
             
-            visited.add(current_url)
-            pages_visited += 1
+            # 1. Save unique emails
+            for email in data.get("emails", []):
+                # Filter DB duplicates
+                contact, created = LeadContact.objects.get_or_create(
+                    company=company,
+                    email=email[:255],
+                    defaults={"source": company.website[:2000]}
+                )
+                if created:
+                    discovered.append(contact)
 
-            try:
-                logger.info(f"Crawling page: {current_url}")
-                res = requests.get(current_url, headers=headers, timeout=8)
-                if res.status_code != 200:
-                    continue
+            # 2. Update company phone if not set
+            for phone in data.get("phones", []):
+                if not company.phone:
+                    company.phone = phone[:50]
+                    company.save()
+                    break
 
-                html = res.text
-                soup = BeautifulSoup(html, "html.parser")
-                text = soup.get_text()
-
-                # 1. Extract Emails
-                emails = EMAIL_REGEX.findall(text)
-                for email in emails:
-                    email_clean = email.lower().strip()
-                    # Filter out common false positives/image extensions
-                    if email_clean not in found_emails and not any(email_clean.endswith(ext) for ext in [".png", ".jpg", ".gif", ".webp", ".svg"]):
-                        found_emails.add(email_clean)
-                        contact = LeadContact.objects.create(
-                            company=company,
-                            email=email_clean[:255],
-                            source=current_url[:2000]
-                        )
-                        discovered.append(contact)
-
-                # 2. Extract Phone Numbers
-                phones = PHONE_REGEX.findall(text)
-                for phone in phones:
-                    phone_clean = phone.strip()
-                    if phone_clean not in found_phones and len(phone_clean) > 8:
-                        found_phones.add(phone_clean)
-                        # Update company phone if not set, or save as contact
-                        if not company.phone:
-                            company.phone = phone_clean
-                            company.save()
-
-                # 3. Extract LinkedIn
-                for link in soup.find_all("a", href=True):
-                    href = link["href"]
-                    match = LINKEDIN_REGEX.search(href)
-                    if match:
-                        li_url = match.group(0)
-                        if li_url not in found_linkedins:
-                            found_linkedins.add(li_url)
-                            # Create a contact record for LinkedIn
-                            contact = LeadContact.objects.create(
-                                company=company,
-                                email="linkedin@placeholder.com",
-                                linkedin=li_url[:2000],
-                                role="Company Page",
-                                source=current_url[:2000]
-                            )
-                            discovered.append(contact)
-
-                # 4. Find internal links to visit next (only on the homepage/first turn)
-                if pages_visited == 1:
-                    priority_links = []
-                    regular_links = []
-
-                    for link in soup.find_all("a", href=True):
-                        href = link["href"]
-                        # Resolve relative links
-                        if href.startswith("/"):
-                            href = company.website.rstrip("/") + href
-                        
-                        href_lower = href.lower()
-                        # Pick high-value contact pages
-                        if any(k in href_lower for k in ["contact", "touch", "contactus", "get-in-touch"]):
-                            priority_links.append(href)
-                        elif any(k in href_lower for k in ["about", "support", "hello", "reach", "info", "terms", "email", "address", "location"]):
-                            regular_links.append(href)
-
-                    # Prioritize contact pages at the front of queue
-                    for href in reversed(priority_links):
-                        if href not in visited and href.startswith(company.website) and href not in to_visit:
-                            to_visit.insert(0, href)
-                    for href in regular_links:
-                        if href not in visited and href.startswith(company.website) and href not in to_visit:
-                            to_visit.append(href)
-
-            except Exception as e:
-                logger.error(f"Error crawling {current_url} for contacts: {e}")
+            # 3. Save LinkedIn links
+            for li_url in data.get("linkedin_urls", []):
+                # Create a contact record for LinkedIn if not already created
+                contact, created = LeadContact.objects.get_or_create(
+                    company=company,
+                    linkedin=li_url[:2000],
+                    defaults={
+                        "email": "linkedin@placeholder.com",
+                        "role": "Company Page",
+                        "source": company.website[:2000]
+                    }
+                )
+                if created:
+                    discovered.append(contact)
 
         return discovered

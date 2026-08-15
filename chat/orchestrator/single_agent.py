@@ -12,6 +12,12 @@ from llm.tools.implementations.github_tool import (
 )
 from llm.tools.implementations.browser_tool import BrowserTool
 from llm.tools.implementations.vision_tool import AnalyzeScreenshotTool
+from llm.tools.implementations.discovery_tools import (
+    SearchCompaniesTool,
+    SearchWebTool,
+    CrawlWebsiteTool,
+    ExtractContactDataTool
+)
 from chat.models import Conversation, Message, AgentRun
 
 class SingleAgentOrchestrator:
@@ -30,6 +36,10 @@ class SingleAgentOrchestrator:
         self.tool_registry.register(GitHubCreatePRTool())
         self.tool_registry.register(BrowserTool())
         self.tool_registry.register(AnalyzeScreenshotTool())
+        self.tool_registry.register(SearchCompaniesTool())
+        self.tool_registry.register(SearchWebTool())
+        self.tool_registry.register(CrawlWebsiteTool())
+        self.tool_registry.register(ExtractContactDataTool())
         
         self.research_agent = ResearchAgent(
             provider=self.provider,

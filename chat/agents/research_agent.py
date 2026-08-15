@@ -88,6 +88,18 @@ class ResearchAgent(BaseAgent):
         messages = [{"role": "user", "content": prompt}]
         loop_state = LoopState()
         
+        # Initialize Tool Platform Executor & Context
+        from llm.tools.executor import ToolExecutor
+        from llm.tools.context import ToolContext
+        
+        executor = ToolExecutor(self.tool_registry)
+        agent_run_id = kwargs.get("agent_run_id")
+        context = ToolContext(
+            source="agent",
+            agent_name=self.name,
+            metadata={"agent_run_id": agent_run_id} if agent_run_id else {}
+        )
+        
         self.accumulated_prompt_tokens = 0
         self.accumulated_completion_tokens = 0
         
@@ -156,10 +168,16 @@ class ResearchAgent(BaseAgent):
                         continue
                     
                     try:
-                        tool = self.tool_registry.get_tool(tool_name)
-                        tool_result = tool.execute(**tool_args)
-                        tool_success = not (str(tool_result).startswith("Error") or str(tool_result).startswith("Tool error"))
-                        status = "success" if tool_success else "error"
+                        exec_result = executor.execute(tool_name, tool_args, context=context)
+                        
+                        if exec_result.success:
+                            tool_result = str(exec_result.data)
+                            tool_success = True
+                            status = "success"
+                        else:
+                            tool_result = f"Error: {exec_result.error.message if exec_result.error else 'Unknown error'}"
+                            tool_success = False
+                            status = "error"
                         
                         # Record execution callback
                         if on_tool_execution:
@@ -168,7 +186,7 @@ class ResearchAgent(BaseAgent):
                         messages.append({
                             "role": "tool",
                             "tool_name": tool_name,
-                            "content": str(tool_result)
+                            "content": tool_result
                         })
                     except Exception as e:
                         tool_result = f"Tool execution failed: {str(e)}"

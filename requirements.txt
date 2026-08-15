@@ -88,3 +88,11 @@ xxhash==3.8.1
 zope.interface==8.5
 zstandard==0.25.0
 beautifulsoup4==4.12.3
+drf-spectacular==0.30.0
+inflection==0.5.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
+uritemplate==4.2.0
+

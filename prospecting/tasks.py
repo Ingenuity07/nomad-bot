@@ -79,13 +79,32 @@ def discover_campaign_async(run_id: str):
         run.status = 'running'
         run.save()
 
-        # 1. Select the best available discovery provider
-        provider_name = "search"
-        for name in ["google_places", "apify", "search"]:
-            prov = discovery_provider_registry.get(name)
-            if prov.health_check():
-                provider_name = name
-                break
+        # 1. Initialize Tool Platform
+        import os
+        from llm.tools.context import ToolContext
+        from llm.tools.executor import ToolExecutor
+        from chat.orchestrator.single_agent import SingleAgentOrchestrator
+
+        orchestrator = SingleAgentOrchestrator()
+        executor = ToolExecutor(orchestrator.tool_registry)
+        context = ToolContext(
+            run_id=str(run.id),
+            source="workflow"
+        )
+
+        # Select the best available discovery provider dynamically
+        provider_name = "openstreetmap"
+        for name in ["google_places", "apify", "openstreetmap"]:
+            try:
+                from llm.providers.registry import provider_registry
+                prov = provider_registry.get(name)
+                # Default to True if the provider does not define health_check
+                is_healthy = prov.health_check() if hasattr(prov, "health_check") else True
+                if is_healthy:
+                    provider_name = name
+                    break
+            except KeyError:
+                pass
 
         logger.info(f"Selected discovery provider: {provider_name}")
         broadcast_progress(
@@ -120,13 +139,36 @@ def discover_campaign_async(run_id: str):
             except Exception as llm_err:
                 logger.error(f"Failed to optimize search keyword using LLM: {llm_err}")
 
-        provider = discovery_provider_registry.get(provider_name)
-        req = DiscoveryRequest(query=search_keyword, location=run.location, limit=20)
-        
-        # Execute query
+        # Execute company discovery using SearchCompaniesTool
         logger.info(f"Running search for: \"{search_keyword}\" in \"{run.location}\" using provider \"{provider_name}\"...")
-        result = provider.search(req)
-        logger.info(f"Discovered {len(result.results)} raw leads.")
+        tool_result = executor.execute(
+            "search_companies",
+            {
+                "query": search_keyword,
+                "geography": run.location,
+                "limit": 20,
+                "provider": provider_name
+            },
+            context=context
+        )
+
+        # Parse discovery tool outputs into DiscoveryResultItems for Deduplicator compatibility
+        from prospecting.discovery.dto import DiscoveryResultItem
+        discovered_leads: List[DiscoveryResultItem] = []
+        if tool_result.success and tool_result.data:
+            for c in tool_result.data.get("companies", []):
+                discovered_leads.append(
+                    DiscoveryResultItem(
+                        name=c["name"],
+                        website=c.get("website"),
+                        phone=c.get("phone"),
+                        address=c.get("address"),
+                        category=c.get("category"),
+                        external_id=c.get("external_id"),
+                        raw_reference=c.get("raw_metadata", {})
+                    )
+                )
+        logger.info(f"Discovered {len(discovered_leads)} raw leads.")
 
         # 2. Entity Resolution & Deduplication
         broadcast_progress(run_id, "resolving", 40, "Deduplicating discovered leads...")
@@ -134,7 +176,7 @@ def discover_campaign_async(run_id: str):
         duplicate_count = 0
         leads_to_process = []
 
-        for item in result.results:
+        for item in discovered_leads:
             existing = Deduplicator.find_existing_company(item)
             if existing:
                 duplicate_count += 1
@@ -166,19 +208,20 @@ def discover_campaign_async(run_id: str):
             )
             logger.info(msg)
             try:
-                # Extract contacts and analyze website
+                # Extract contacts using ContactExtractor
                 ContactExtractor.extract_contacts(company)
+                # Analyze website using existing LLM analyzer
                 analyzer.analyze_website(company)
             except Exception as enrich_err:
                 logger.error(f"Enrichment failed for {company.name}: {enrich_err}")
 
         # 4. Finalize Run
         run.status = 'completed'
-        run.total_leads_found = len(result.results)
+        run.total_leads_found = len(discovered_leads)
         run.save()
 
         broadcast_progress(run_id, "completed", 100, "Discovery and enrichment finished.")
-        broadcast_completion(run_id, len(result.results), new_count, duplicate_count)
+        broadcast_completion(run_id, len(discovered_leads), new_count, duplicate_count)
 
         return {
             "status": "success",

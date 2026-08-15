@@ -8,11 +8,13 @@ class ToolRegistry:
         self._tools: Dict[str, BaseTool] = {}
         
     def register(self, tool: BaseTool):
+        if tool.name in self._tools:
+            raise ValueError(f"Tool with name '{tool.name}' is already registered.")
         self._tools[tool.name] = tool
         
     def get_tool(self, name: str) -> BaseTool:
         if name not in self._tools:
-            raise ValueError(f"Tool {name} not found in registry.")
+            raise ValueError(f"Tool '{name}' not found in registry.")
         return self._tools[name]
         
     def get_all_tools(self) -> list[BaseTool]:
