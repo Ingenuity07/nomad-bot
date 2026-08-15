@@ -57,15 +57,26 @@ class ProspectingDiscoverAPIView(APIView):
         )
 
         try:
-            # Dispatch asynchronous celery task
-            discover_campaign_async.delay(str(run.id))
-            return Response({
-                "status": "success",
-                "run_id": str(run.id),
-                "message": "Discovery run queued successfully."
-            }, status=status.HTTP_201_CREATED)
+            is_dev = os.environ.get("DEV", "False").lower() in ("true", "1", "yes")
+            if is_dev:
+                # Process synchronously
+                result = discover_campaign_async(str(run.id))
+                return Response({
+                    "status": "success",
+                    "run_id": str(run.id),
+                    "message": "Discovery run executed synchronously.",
+                    "result": result
+                }, status=status.HTTP_200_OK)
+            else:
+                # Dispatch asynchronous celery task
+                discover_campaign_async.delay(str(run.id))
+                return Response({
+                    "status": "success",
+                    "run_id": str(run.id),
+                    "message": "Discovery run queued successfully."
+                }, status=status.HTTP_201_CREATED)
         except Exception as e:
-            logger.exception("Failed to dispatch prospecting task")
+            logger.exception("Failed to execute or dispatch prospecting task")
             run.status = 'failed'
             run.save()
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
