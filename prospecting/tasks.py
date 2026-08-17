@@ -114,60 +114,96 @@ def discover_campaign_async(run_id: str):
             f"Searching target directory using {provider_name}..."
         )
 
-        # Optimize query keyword using LLM if it looks like a long description/paragraph
-        search_keyword = run.keyword
-        words = search_keyword.split()
-        if len(words) > 4 or any(w in search_keyword.lower() for w in ["app", "built", "helps", "business", "finding", "routing", "optimis"]):
-            logger.info(f"Optimizing search query with LLM: \"{run.keyword[:40]}...\"")
+        # 1. Discovery Planner: derive search terms from specification if available
+        search_keywords = []
+        if run.specification_version:
             try:
-                from llm.router import IntelligentRouter
-                import json
-                router = IntelligentRouter()
-                prompt = (
-                    "Extract 1 to 2 clean, short, standard business categories or search keywords (e.g., 'courier', 'logistics', 'delivery service') "
-                    "from the following product or business pain point description:\n\n"
-                    f"\"{search_keyword}\"\n\n"
-                    "Return a JSON object with a single key 'keywords' containing a list of strings."
-                )
-                res = router.generate(prompt, system_prompt="You are a helpful keyword extraction assistant. Respond in raw JSON.")
-                if res.get("type") == "text":
-                    parsed = json.loads(res.get("text", "{}"))
-                    extracted = parsed.get("keywords", [])
-                    if extracted:
-                        search_keyword = extracted[0]
-                        logger.info(f"LLM optimized search keyword: '{search_keyword}' (original: '{run.keyword}')")
-            except Exception as llm_err:
-                logger.error(f"Failed to optimize search keyword using LLM: {llm_err}")
+                from prospecting.intent.schemas import ProspectingSpecification
+                spec = ProspectingSpecification.model_validate(run.specification_version.specification_json)
+                cats = spec.target.categories.value
+                if cats:
+                    search_keywords = [c for c in cats if c.strip()]
+                
+                if not search_keywords:
+                    logger.info("Discovery Planner deriving search terms using router...")
+                    from llm.router import IntelligentRouter
+                    import json
+                    router = IntelligentRouter()
+                    planner_prompt = (
+                        f"Based on the target description: \"{spec.target.description.value}\" "
+                        f"and objective: \"{spec.objective.value}\", generate a JSON list of 2 to 3 optimized, "
+                        "short search keyword terms (e.g., 'pest control', 'courier service') to find matching companies. "
+                        "Return a JSON object with key 'search_queries'."
+                    )
+                    res = router.generate(prompt=planner_prompt, system_prompt="You are a helpful search optimization planner. Respond in raw JSON.")
+                    if res.get("type") == "text":
+                        parsed = json.loads(res.get("text", "{}"))
+                        search_keywords = parsed.get("search_queries", [])
+            except Exception as planner_err:
+                logger.error(f"Discovery Planner failed: {planner_err}")
 
-        # Execute company discovery using SearchCompaniesTool
-        logger.info(f"Running search for: \"{search_keyword}\" in \"{run.location}\" using provider \"{provider_name}\"...")
-        tool_result = executor.execute(
-            "search_companies",
-            {
-                "query": search_keyword,
-                "geography": run.location,
-                "limit": 20,
-                "provider": provider_name
-            },
-            context=context
-        )
+        # Fallback to run.keyword if no terms derived
+        if not search_keywords:
+            search_keywords = [run.keyword]
 
-        # Parse discovery tool outputs into DiscoveryResultItems for Deduplicator compatibility
+        # Execute company discovery using SearchCompaniesTool for each derived keyword
         from prospecting.discovery.dto import DiscoveryResultItem
         discovered_leads: List[DiscoveryResultItem] = []
-        if tool_result.success and tool_result.data:
-            for c in tool_result.data.get("companies", []):
-                discovered_leads.append(
-                    DiscoveryResultItem(
-                        name=c["name"],
-                        website=c.get("website"),
-                        phone=c.get("phone"),
-                        address=c.get("address"),
-                        category=c.get("category"),
-                        external_id=c.get("external_id"),
-                        raw_reference=c.get("raw_metadata", {})
+        seen_lead_keys = set()
+        
+        for search_keyword in search_keywords:
+            words = search_keyword.split()
+            if not run.specification_version and (len(words) > 4 or any(w in search_keyword.lower() for w in ["app", "built", "helps", "business", "finding", "routing", "optimis"])):
+                logger.info(f"Optimizing search query with LLM: \"{search_keyword[:40]}...\"")
+                try:
+                    from llm.router import IntelligentRouter
+                    import json
+                    router = IntelligentRouter()
+                    prompt = (
+                        "Extract 1 to 2 clean, short, standard business categories or search keywords (e.g., 'courier', 'logistics', 'delivery service') "
+                        "from the following product or business pain point description:\n\n"
+                        f"\"{search_keyword}\"\n\n"
+                        "Return a JSON object with a single key 'keywords' containing a list of strings."
                     )
-                )
+                    res = router.generate(prompt, system_prompt="You are a helpful keyword extraction assistant. Respond in raw JSON.")
+                    if res.get("type") == "text":
+                        parsed = json.loads(res.get("text", "{}"))
+                        extracted = parsed.get("keywords", [])
+                        if extracted:
+                            search_keyword = extracted[0]
+                except Exception as llm_err:
+                    logger.error(f"Failed to optimize search keyword using LLM: {llm_err}")
+
+            logger.info(f"Running search for: \"{search_keyword}\" in \"{run.location}\" using provider \"{provider_name}\"...")
+            tool_result = executor.execute(
+                "search_companies",
+                {
+                    "query": search_keyword,
+                    "geography": run.location,
+                    "limit": 20,
+                    "provider": provider_name
+                },
+                context=context
+            )
+
+            if tool_result.success and tool_result.data:
+                for c in tool_result.data.get("companies", []):
+                    name_key = c["name"].lower().strip()
+                    web_key = c.get("website", "").lower().strip() if c.get("website") else ""
+                    lead_key = (name_key, web_key)
+                    if lead_key not in seen_lead_keys:
+                        seen_lead_keys.add(lead_key)
+                        discovered_leads.append(
+                            DiscoveryResultItem(
+                                name=c["name"],
+                                website=c.get("website"),
+                                phone=c.get("phone"),
+                                address=c.get("address"),
+                                category=c.get("category"),
+                                external_id=c.get("external_id"),
+                                raw_reference=c.get("raw_metadata", {})
+                            )
+                        )
         logger.info(f"Discovered {len(discovered_leads)} raw leads.")
 
         # 2. Entity Resolution & Deduplication
@@ -180,8 +216,10 @@ def discover_campaign_async(run_id: str):
             existing = Deduplicator.find_existing_company(item)
             if existing:
                 duplicate_count += 1
+                from prospecting.models import DiscoveryLead
+                DiscoveryLead.objects.get_or_create(discovery_run=run, company=existing)
+                leads_to_process.append(existing)
             else:
-                # Create a new canonical LeadCompany record
                 company = LeadCompanyRepository.create_company(
                     discovery_run=run,
                     name=item.name,
@@ -191,6 +229,8 @@ def discover_campaign_async(run_id: str):
                     category=item.category
                 )
                 new_count += 1
+                from prospecting.models import DiscoveryLead
+                DiscoveryLead.objects.get_or_create(discovery_run=run, company=company)
                 leads_to_process.append(company)
 
         # 3. Enrichment (Contacts & Suitability Analysis)

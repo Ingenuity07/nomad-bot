@@ -10,11 +10,21 @@ from .views import (
     EmailSequenceListCreateAPIView, EmailMessageListCreateAPIView,
     EmailMessageSendAPIView, InboundReplyListCreateAPIView,
     LeadFeedbackAPIView, DashboardOverviewAPIView, DashboardSignalsAPIView,
-    DashboardFunnelAPIView, DashboardOpportunitiesAPIView, LeadCRMSyncAPIView
+    DashboardFunnelAPIView, DashboardOpportunitiesAPIView, LeadCRMSyncAPIView,
+    ProspectingIntakeAPIView, ProspectingIntakeDetailAPIView, ProspectingIntakeParseAPIView,
+    ProspectingIntakeClarifyAPIView, ProspectingIntakeSpecificationAPIView,
+    ProspectingIntakeConfirmAPIView, ProspectingIntakeCancelAPIView
 )
 
 urlpatterns = [
     path('discover/', ProspectingDiscoverAPIView.as_view(), name='prospecting-discover'),
+    path('intake/', ProspectingIntakeAPIView.as_view(), name='prospecting-intake-list-create'),
+    path('intake/<uuid:pk>/', ProspectingIntakeDetailAPIView.as_view(), name='prospecting-intake-detail'),
+    path('intake/<uuid:pk>/parse/', ProspectingIntakeParseAPIView.as_view(), name='prospecting-intake-parse'),
+    path('intake/<uuid:pk>/clarify/', ProspectingIntakeClarifyAPIView.as_view(), name='prospecting-intake-clarify'),
+    path('intake/<uuid:pk>/specification/', ProspectingIntakeSpecificationAPIView.as_view(), name='prospecting-intake-specification'),
+    path('intake/<uuid:pk>/confirm/', ProspectingIntakeConfirmAPIView.as_view(), name='prospecting-intake-confirm'),
+    path('intake/<uuid:pk>/cancel/', ProspectingIntakeCancelAPIView.as_view(), name='prospecting-intake-cancel'),
     path('leads/', ProspectingLeadsAPIView.as_view(), name='prospecting-leads'),
     path('leads/<uuid:pk>/', LeadDetailAPIView.as_view(), name='lead-detail'),
     path('leads/<uuid:pk>/evidence/', LeadEvidenceAPIView.as_view(), name='lead-evidence'),

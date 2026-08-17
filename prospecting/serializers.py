@@ -157,3 +157,27 @@ class CRMIntegrationRecordSerializer(serializers.ModelSerializer):
         model = CRMIntegrationRecord
         fields = ['id', 'company', 'person', 'external_crm', 'external_id', 'synced_at']
         read_only_fields = ['id', 'synced_at']
+
+
+from prospecting.models import ProspectingRequest, ProspectingSpecificationVersion, Discovery
+
+class ProspectingRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProspectingRequest
+        fields = ['id', 'user_profile', 'raw_objective', 'raw_target', 'raw_qualification', 'clarification_history', 'status', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user_profile', 'clarification_history', 'status', 'created_at', 'updated_at']
+
+
+class ProspectingSpecificationVersionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProspectingSpecificationVersion
+        fields = ['id', 'request', 'version', 'schema_version', 'specification_json', 'status', 'parser_model', 'parser_provider', 'prompt_version', 'created_at', 'confirmed_at', 'confirmed_by']
+        read_only_fields = ['id', 'request', 'version', 'schema_version', 'status', 'parser_model', 'parser_provider', 'prompt_version', 'created_at', 'confirmed_at', 'confirmed_by']
+
+
+class DiscoverySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Discovery
+        fields = ['id', 'user_profile', 'prospecting_request', 'specification_version', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user_profile', 'prospecting_request', 'specification_version', 'created_at', 'updated_at']
+

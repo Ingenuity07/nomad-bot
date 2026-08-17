@@ -819,3 +819,174 @@ class LeadCRMSyncAPIView(APIView):
 
         except LeadCompany.DoesNotExist:
             return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+from prospecting.serializers import (
+    ProspectingRequestSerializer,
+    ProspectingSpecificationVersionSerializer,
+    DiscoverySerializer
+)
+from prospecting.intent.service import ProspectingIntentService
+from prospecting.intent.schemas import ProspectingSpecification
+from prospecting.intent.validator import SpecificationValidationError
+from prospecting.models import ProspectingRequest, ProspectingSpecificationVersion, Discovery
+
+class ProspectingIntakeAPIView(APIView):
+    """Create a new prospecting request or list existing ones."""
+    def get(self, request):
+        user = get_default_user()
+        requests = ProspectingRequest.objects.filter(user_profile=user).order_by('-created_at')
+        serializer = ProspectingRequestSerializer(requests, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        user = get_default_user()
+        objective = request.data.get("objective", "").strip()
+        target = request.data.get("target", "").strip()
+        qualification = request.data.get("qualification", "").strip()
+
+        if not objective:
+            return Response({"error": "objective is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. Create request
+        req = ProspectingIntentService.create_intake_request(
+            user_profile=user,
+            objective=objective,
+            target=target,
+            qualification=qualification
+        )
+
+        # 2. Parse request intent immediately
+        try:
+            spec_ver = ProspectingIntentService.parse_request(str(req.id))
+            return Response({
+                "request": ProspectingRequestSerializer(req).data,
+                "specification_version": ProspectingSpecificationVersionSerializer(spec_ver).data
+            }, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            logger.exception("Failed to parse request intent during post")
+            return Response({
+                "request": ProspectingRequestSerializer(req).data,
+                "error": str(e)
+            }, status=status.HTTP_201_CREATED)
+
+
+class ProspectingIntakeDetailAPIView(APIView):
+    """Retrieve detailed prospecting request metadata and specifications list."""
+    def get(self, request, pk):
+        user = get_default_user()
+        try:
+            req = ProspectingRequest.objects.get(id=pk, user_profile=user)
+            versions = req.spec_versions.order_by('-version')
+            return Response({
+                "request": ProspectingRequestSerializer(req).data,
+                "versions": ProspectingSpecificationVersionSerializer(versions, many=True).data
+            }, status=status.HTTP_200_OK)
+        except ProspectingRequest.DoesNotExist:
+            return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class ProspectingIntakeParseAPIView(APIView):
+    """Trigger a new intent parsing run manually."""
+    def post(self, request, pk):
+        user = get_default_user()
+        try:
+            req = ProspectingRequest.objects.get(id=pk, user_profile=user)
+            spec_ver = ProspectingIntentService.parse_request(str(req.id))
+            return Response({
+                "request": ProspectingRequestSerializer(req).data,
+                "specification_version": ProspectingSpecificationVersionSerializer(spec_ver).data
+            }, status=status.HTTP_200_OK)
+        except ProspectingRequest.DoesNotExist:
+            return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProspectingIntakeClarifyAPIView(APIView):
+    """Submit a clarification answer and reparse updated intake parameters."""
+    def post(self, request, pk):
+        user = get_default_user()
+        try:
+            req = ProspectingRequest.objects.get(id=pk, user_profile=user)
+            question = request.data.get("question", "").strip()
+            answer = request.data.get("answer", "").strip()
+
+            if not question or not answer:
+                return Response({"error": "question and answer are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            spec_ver = ProspectingIntentService.submit_clarification(str(req.id), question, answer)
+            return Response({
+                "request": ProspectingRequestSerializer(req).data,
+                "specification_version": ProspectingSpecificationVersionSerializer(spec_ver).data
+            }, status=status.HTTP_200_OK)
+        except ProspectingRequest.DoesNotExist:
+            return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProspectingIntakeSpecificationAPIView(APIView):
+    """Save an edited specification, creating a new draft/review version."""
+    def patch(self, request, pk):
+        user = get_default_user()
+        try:
+            req = ProspectingRequest.objects.get(id=pk, user_profile=user)
+            spec_json = request.data.get("specification_json")
+            if not spec_json:
+                return Response({"error": "specification_json is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            spec_ver = ProspectingIntentService.update_specification(str(req.id), spec_json)
+            return Response({
+                "request": ProspectingRequestSerializer(req).data,
+                "specification_version": ProspectingSpecificationVersionSerializer(spec_ver).data
+            }, status=status.HTTP_200_OK)
+        except ProspectingRequest.DoesNotExist:
+            return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
+        except SpecificationValidationError as ve:
+            return Response({"errors": ve.errors}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as val_err:
+            return Response({"error": str(val_err)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProspectingIntakeConfirmAPIView(APIView):
+    """Confirm a specific version, lock it, and dispatch discovery Celery workflow."""
+    def post(self, request, pk):
+        user = get_default_user()
+        try:
+            req = ProspectingRequest.objects.get(id=pk, user_profile=user)
+            version = request.data.get("version")
+            if version is None:
+                return Response({"error": "version is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            discovery = ProspectingIntentService.confirm_specification(str(req.id), int(version), user)
+            return Response({
+                "message": "Specification confirmed and discovery run dispatched successfully.",
+                "discovery": DiscoverySerializer(discovery).data
+            }, status=status.HTTP_200_OK)
+        except ProspectingRequest.DoesNotExist:
+            return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
+        except SpecificationValidationError as ve:
+            return Response({"errors": ve.errors}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as val_err:
+            return Response({"error": str(val_err)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProspectingIntakeCancelAPIView(APIView):
+    """Cancel a prospecting request workflow."""
+    def post(self, request, pk):
+        user = get_default_user()
+        try:
+            req = ProspectingRequest.objects.get(id=pk, user_profile=user)
+            if req.status == 'CONFIRMED':
+                return Response({"error": "Cannot cancel a request that has already been confirmed."}, status=status.HTTP_400_BAD_REQUEST)
+            req.status = 'CANCELLED'
+            req.save()
+            return Response(ProspectingRequestSerializer(req).data, status=status.HTTP_200_OK)
+        except ProspectingRequest.DoesNotExist:
+            return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
+

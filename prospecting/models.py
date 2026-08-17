@@ -104,6 +104,10 @@ class DiscoveryRun(models.Model):
     total_leads_found = models.IntegerField(default=0)
     started_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    
+    discovery = models.ForeignKey('Discovery', on_delete=models.SET_NULL, null=True, blank=True, related_name='runs')
+    prospecting_request = models.ForeignKey('ProspectingRequest', on_delete=models.SET_NULL, null=True, blank=True, related_name='discovery_runs')
+    specification_version = models.ForeignKey('ProspectingSpecificationVersion', on_delete=models.SET_NULL, null=True, blank=True, related_name='discovery_runs')
 
     def __str__(self):
         return f"Discovery Run: {self.keyword} in {self.location} ({self.status})"
@@ -111,7 +115,7 @@ class DiscoveryRun(models.Model):
 
 class LeadCompany(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    discovery_run = models.ForeignKey(DiscoveryRun, on_delete=models.CASCADE, related_name='companies')
+    discovery_run = models.ForeignKey(DiscoveryRun, on_delete=models.CASCADE, related_name='companies', null=True, blank=True)
     campaign = models.ForeignKey(ProspectingCampaign, on_delete=models.CASCADE, related_name='companies', null=True, blank=True)
     name = models.CharField(max_length=255)
     website = models.URLField(max_length=2000, null=True, blank=True)
@@ -560,3 +564,83 @@ class CRMIntegrationRecord(models.Model):
 
     def __str__(self):
         return f"CRM Sync: {self.external_crm} - ID: {self.external_id}"
+
+
+class ProspectingRequest(models.Model):
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('PARSING', 'Parsing'),
+        ('NEEDS_CLARIFICATION', 'Needs Clarification'),
+        ('READY_FOR_REVIEW', 'Ready For Review'),
+        ('CONFIRMED', 'Confirmed'),
+        ('EXECUTING', 'Executing'),
+        ('COMPLETED', 'Completed'),
+        ('FAILED', 'Failed'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user_profile = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name='prospecting_requests')
+    raw_objective = models.TextField(null=True, blank=True)
+    raw_target = models.TextField(null=True, blank=True)
+    raw_qualification = models.TextField(null=True, blank=True)
+    clarification_history = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='DRAFT')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Request {self.id} ({self.status})"
+
+
+class ProspectingSpecificationVersion(models.Model):
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('READY_FOR_REVIEW', 'Ready For Review'),
+        ('CONFIRMED', 'Confirmed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request = models.ForeignKey(ProspectingRequest, on_delete=models.CASCADE, related_name='spec_versions')
+    version = models.IntegerField(default=1)
+    schema_version = models.CharField(max_length=50, default='v1')
+    specification_json = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='DRAFT')
+    parser_model = models.CharField(max_length=255, null=True, blank=True)
+    parser_provider = models.CharField(max_length=255, null=True, blank=True)
+    prompt_version = models.CharField(max_length=50, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    confirmed_by = models.ForeignKey(UserProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='confirmed_specifications')
+
+    class Meta:
+        unique_together = ('request', 'version')
+
+    def __str__(self):
+        return f"Spec version {self.version} for Request {self.request.id} ({self.status})"
+
+
+class Discovery(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user_profile = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name='discoveries')
+    prospecting_request = models.ForeignKey(ProspectingRequest, on_delete=models.CASCADE, related_name='discoveries')
+    specification_version = models.ForeignKey(ProspectingSpecificationVersion, on_delete=models.CASCADE, related_name='discoveries')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Discovery {self.id} (Spec Version: {self.specification_version.version})"
+
+
+class DiscoveryLead(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    discovery_run = models.ForeignKey(DiscoveryRun, on_delete=models.CASCADE, related_name='discovery_leads')
+    company = models.ForeignKey(LeadCompany, on_delete=models.CASCADE, related_name='discovery_leads')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('discovery_run', 'company')
+
+    def __str__(self):
+        return f"DiscoveryLead Link: Run {self.discovery_run.id} <-> Company {self.company.name}"
+
