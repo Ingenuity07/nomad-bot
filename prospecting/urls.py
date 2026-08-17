@@ -13,11 +13,13 @@ from .views import (
     DashboardFunnelAPIView, DashboardOpportunitiesAPIView, LeadCRMSyncAPIView,
     ProspectingIntakeAPIView, ProspectingIntakeDetailAPIView, ProspectingIntakeParseAPIView,
     ProspectingIntakeClarifyAPIView, ProspectingIntakeSpecificationAPIView,
-    ProspectingIntakeConfirmAPIView, ProspectingIntakeCancelAPIView
+    ProspectingIntakeConfirmAPIView, ProspectingIntakeCancelAPIView,
+    ProspectingDiscoverStatusAPIView
 )
 
 urlpatterns = [
     path('discover/', ProspectingDiscoverAPIView.as_view(), name='prospecting-discover'),
+    path('discover/<uuid:pk>/status/', ProspectingDiscoverStatusAPIView.as_view(), name='prospecting-discover-status'),
     path('intake/', ProspectingIntakeAPIView.as_view(), name='prospecting-intake-list-create'),
     path('intake/<uuid:pk>/', ProspectingIntakeDetailAPIView.as_view(), name='prospecting-intake-detail'),
     path('intake/<uuid:pk>/parse/', ProspectingIntakeParseAPIView.as_view(), name='prospecting-intake-parse'),

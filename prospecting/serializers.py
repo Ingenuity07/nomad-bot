@@ -21,12 +21,16 @@ class LeadCompanySerializer(serializers.ModelSerializer):
     lead_score = serializers.SerializerMethodField()
     fit_class = serializers.SerializerMethodField()
     buying_window_class = serializers.SerializerMethodField()
+    discovery_run_id = serializers.UUIDField(source='discovery_run.id', read_only=True, allow_null=True)
+    discovery_run_keyword = serializers.CharField(source='discovery_run.keyword', read_only=True, allow_null=True)
+    discovery_run_location = serializers.CharField(source='discovery_run.location', read_only=True, allow_null=True)
 
     class Meta:
         model = LeadCompany
         fields = [
             'id', 'name', 'website', 'phone', 'address', 'category', 'rating',
-            'lead_score', 'fit_class', 'buying_window_class', 'created_at'
+            'lead_score', 'fit_class', 'buying_window_class', 'created_at',
+            'discovery_run_id', 'discovery_run_keyword', 'discovery_run_location'
           ]
 
     def get_lead_score(self, obj):

@@ -15,6 +15,13 @@ from prospecting.analyzer import WebsiteAnalyzer
 logger = logging.getLogger(__name__)
 
 def broadcast_progress(run_id: str, stage: str, progress: int, message: str):
+    cache.set(f"discovery_run:{run_id}:progress", {
+        "stage": stage,
+        "progress": progress,
+        "message": message,
+        "status": "failed" if stage == "failed" else ("completed" if stage == "completed" else "running")
+    }, timeout=86400)
+
     channel_layer = get_channel_layer()
     if channel_layer:
         async_to_sync(channel_layer.group_send)(
@@ -32,6 +39,12 @@ def broadcast_progress(run_id: str, stage: str, progress: int, message: str):
         )
 
 def broadcast_completion(run_id: str, discovered: int, new_companies: int, duplicates: int):
+    cache.set(f"discovery_run:{run_id}:metrics", {
+        "discovered": discovered,
+        "new": new_companies,
+        "duplicates": duplicates
+    }, timeout=86400)
+
     channel_layer = get_channel_layer()
     if channel_layer:
         async_to_sync(channel_layer.group_send)(
@@ -292,12 +305,10 @@ def refresh_stale_companies_task():
     from prospecting.models import LeadCompany
     
     stale_cutoff = timezone.now() - timedelta(days=30)
-    stale_leads = LeadCompany.objects.filter(updated_at__lt=stale_cutoff)
+    stale_leads = LeadCompany.objects.filter(created_at__lt=stale_cutoff)
     count = stale_leads.count()
     
     logger.info(f"Running periodic stale company refresh checks. Found {count} stale company records.")
-    # In real pipeline, we trigger a background crawl update. For mock execution:
-    stale_leads.update(updated_at=timezone.now())
     return {"status": "success", "processed_count": count}
 
 
@@ -332,3 +343,19 @@ def detect_new_signals_task():
     """
     logger.info("Checking external social and API feeds for new problem signals.")
     return {"status": "success"}
+
+
+@shared_task
+def parse_intent_async(request_id: str):
+    """
+    Asynchronously parses a natural language prospecting intent request.
+    """
+    from prospecting.intent.service import ProspectingIntentService
+    logger.info(f"Asynchronous parsing task triggered for Request ID: {request_id}")
+    try:
+        ProspectingIntentService.parse_request(request_id)
+        logger.info(f"Asynchronous parsing completed successfully for Request ID: {request_id}")
+    except Exception as e:
+        logger.exception(f"Asynchronous parsing failed for Request ID: {request_id}: {e}")
+        raise e
+

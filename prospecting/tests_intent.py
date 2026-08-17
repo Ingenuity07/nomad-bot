@@ -266,7 +266,7 @@ class APIEndpointsTestCase(APITestCase):
             )
 
             res = self.client.post(url, data, format='json')
-            self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+            self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
             req_id = res.data["request"]["id"]
 
             detail_url = reverse('prospecting-intake-detail', kwargs={'pk': req_id})
@@ -349,3 +349,13 @@ class IntegrationFlowTestCase(TestCase):
             # Verify explicit DiscoveryLead junction record created
             dl = DiscoveryLead.objects.get(discovery_run=run, company=company)
             self.assertEqual(dl.company.id, company.id)
+
+            # Verify status endpoint returns completed status and fallback metrics
+            status_url = reverse('prospecting-discover-status', kwargs={'pk': run.id})
+            res_status = self.client.get(status_url)
+            self.assertEqual(res_status.status_code, 200)
+            self.assertEqual(res_status.data["status"], "completed")
+            self.assertEqual(res_status.data["progress"], 100)
+            self.assertEqual(res_status.data["metrics"]["discovered"], 1)
+            self.assertEqual(res_status.data["metrics"]["new"], 1)
+            self.assertEqual(res_status.data["metrics"]["duplicates"], 0)

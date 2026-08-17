@@ -211,15 +211,8 @@ class ProspectingIntentService:
             )
 
             # Dispatch async discovery runner on commit
-            is_dev = os.environ.get("DEV", "False").lower() in ("true", "1", "yes")
-            is_test = 'test' in str(os.environ.get("DJANGO_SETTINGS_MODULE", ""))
-            
-            if is_dev or is_test:
-                logger.info(f"Running discovery run {run.id} synchronously (DEV/TEST mode)")
-                transaction.on_commit(lambda: discover_campaign_async(str(run.id)))
-            else:
-                logger.info(f"Enqueuing discovery run {run.id} asynchronously to Celery pool")
-                transaction.on_commit(lambda: discover_campaign_async.delay(str(run.id)))
+            logger.info(f"Enqueuing discovery run {run.id} asynchronously to Celery pool")
+            transaction.on_commit(lambda: discover_campaign_async.delay(str(run.id)))
 
             logger.info(f"Request {request_id} Spec Version {version} successfully locked, confirmed, and run {run.id} dispatched.")
             return discovery

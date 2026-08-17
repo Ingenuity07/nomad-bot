@@ -117,7 +117,7 @@ class ProspectingLeadsAPIView(APIView):
         if category and category.strip():
             queryset = queryset.filter(category__iexact=category.strip())
             
-        queryset = queryset.order_by('-analysis__lead_score', 'name')
+        queryset = queryset.order_by('-created_at', 'name')
         
         total_count = queryset.count()
         total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
@@ -856,19 +856,22 @@ class ProspectingIntakeAPIView(APIView):
             qualification=qualification
         )
 
-        # 2. Parse request intent immediately
+        # 2. Parse request intent asynchronously
         try:
-            spec_ver = ProspectingIntentService.parse_request(str(req.id))
+            from prospecting.tasks import parse_intent_async
+            req.status = 'PARSING'
+            req.save()
+            parse_intent_async.delay(str(req.id))
             return Response({
                 "request": ProspectingRequestSerializer(req).data,
-                "specification_version": ProspectingSpecificationVersionSerializer(spec_ver).data
-            }, status=status.HTTP_201_CREATED)
+                "specification_version": None
+            }, status=status.HTTP_202_ACCEPTED)
         except Exception as e:
-            logger.exception("Failed to parse request intent during post")
+            logger.exception("Failed to dispatch intent parser task")
             return Response({
                 "request": ProspectingRequestSerializer(req).data,
                 "error": str(e)
-            }, status=status.HTTP_201_CREATED)
+            }, status=status.HTTP_202_ACCEPTED)
 
 
 class ProspectingIntakeDetailAPIView(APIView):
@@ -892,11 +895,14 @@ class ProspectingIntakeParseAPIView(APIView):
         user = get_default_user()
         try:
             req = ProspectingRequest.objects.get(id=pk, user_profile=user)
-            spec_ver = ProspectingIntentService.parse_request(str(req.id))
+            from prospecting.tasks import parse_intent_async
+            req.status = 'PARSING'
+            req.save()
+            parse_intent_async.delay(str(req.id))
             return Response({
                 "request": ProspectingRequestSerializer(req).data,
-                "specification_version": ProspectingSpecificationVersionSerializer(spec_ver).data
-            }, status=status.HTTP_200_OK)
+                "message": "Parsing task dispatched successfully."
+            }, status=status.HTTP_202_ACCEPTED)
         except ProspectingRequest.DoesNotExist:
             return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
@@ -915,11 +921,24 @@ class ProspectingIntakeClarifyAPIView(APIView):
             if not question or not answer:
                 return Response({"error": "question and answer are required"}, status=status.HTTP_400_BAD_REQUEST)
 
-            spec_ver = ProspectingIntentService.submit_clarification(str(req.id), question, answer)
+            # Update history and save
+            history = list(req.clarification_history)
+            if history and history[-1].get("answer") == "":
+                history[-1]["answer"] = answer
+            else:
+                history.append({"question": question, "answer": answer})
+            req.clarification_history = history
+            req.status = 'PARSING'
+            req.save()
+
+            # Dispatch parsing task asynchronously
+            from prospecting.tasks import parse_intent_async
+            parse_intent_async.delay(str(req.id))
+
             return Response({
                 "request": ProspectingRequestSerializer(req).data,
-                "specification_version": ProspectingSpecificationVersionSerializer(spec_ver).data
-            }, status=status.HTTP_200_OK)
+                "message": "Clarification submitted. Reparsing..."
+            }, status=status.HTTP_202_ACCEPTED)
         except ProspectingRequest.DoesNotExist:
             return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
@@ -989,4 +1008,63 @@ class ProspectingIntakeCancelAPIView(APIView):
             return Response(ProspectingRequestSerializer(req).data, status=status.HTTP_200_OK)
         except ProspectingRequest.DoesNotExist:
             return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class ProspectingDiscoverStatusAPIView(APIView):
+    """Retrieve real-time status and metrics of a Discovery Run."""
+    def get(self, request, pk):
+        from django.core.cache import cache
+        from prospecting.models import DiscoveryRun, LeadCompany
+        user = get_default_user()
+        try:
+            run = DiscoveryRun.objects.get(id=pk, user_profile=user)
+        except DiscoveryRun.DoesNotExist:
+            return Response({"error": "Discovery run not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 1. Read real-time progress from cache
+        progress_data = cache.get(f"discovery_run:{run.id}:progress")
+        if not progress_data:
+            # Fallback based on database status
+            if run.status == 'completed':
+                progress_data = {
+                    "stage": "completed",
+                    "progress": 100,
+                    "message": "Discovery and enrichment finished.",
+                    "status": "completed"
+                }
+            elif run.status == 'failed':
+                progress_data = {
+                    "stage": "failed",
+                    "progress": 100,
+                    "message": "Discovery run failed.",
+                    "status": "failed"
+                }
+            else:
+                progress_data = {
+                    "stage": "queued",
+                    "progress": 5,
+                    "message": "Initializing task runner...",
+                    "status": "running"
+                }
+
+        # 2. Read metrics from cache or fallback
+        metrics_data = cache.get(f"discovery_run:{run.id}:metrics")
+        if not metrics_data:
+            new_leads = LeadCompany.objects.filter(discovery_run=run).count()
+            discovered = run.total_leads_found or new_leads
+            duplicates = max(0, discovered - new_leads)
+            metrics_data = {
+                "discovered": discovered,
+                "new": new_leads,
+                "duplicates": duplicates
+            }
+
+        return Response({
+            "run_id": str(run.id),
+            "status": run.status,
+            "stage": progress_data["stage"],
+            "progress": progress_data["progress"],
+            "message": progress_data["message"],
+            "metrics": metrics_data
+        }, status=status.HTTP_200_OK)
 
