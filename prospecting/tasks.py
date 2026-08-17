@@ -1,4 +1,5 @@
 import logging
+from typing import List
 from celery import shared_task
 from django.core.cache import cache
 from asgiref.sync import async_to_sync
@@ -105,8 +106,10 @@ def discover_campaign_async(run_id: str):
             source="workflow"
         )
 
-        # Select the best available discovery provider dynamically
-        provider_name = "openstreetmap"
+        # Discover every healthy provider up front. Providers are executed
+        # independently below, so one failure or empty response cannot prevent
+        # the remaining sources from being queried.
+        company_provider_names = []
         for name in ["google_places", "apify", "openstreetmap"]:
             try:
                 from llm.providers.registry import provider_registry
@@ -114,17 +117,31 @@ def discover_campaign_async(run_id: str):
                 # Default to True if the provider does not define health_check
                 is_healthy = prov.health_check() if hasattr(prov, "health_check") else True
                 if is_healthy:
-                    provider_name = name
-                    break
-            except KeyError:
-                pass
+                    company_provider_names.append(name)
+                else:
+                    logger.info(f"Skipping unhealthy discovery provider: {name}")
+            except Exception as provider_err:
+                logger.warning(f"Skipping unavailable discovery provider '{name}': {provider_err}")
 
-        logger.info(f"Selected discovery provider: {provider_name}")
+        web_provider_names = []
+        for name in ["duckduckgo"]:
+            try:
+                prov = provider_registry.get(name)
+                is_healthy = prov.health_check() if hasattr(prov, "health_check") else True
+                if is_healthy:
+                    web_provider_names.append(name)
+                else:
+                    logger.info(f"Skipping unhealthy web provider: {name}")
+            except Exception as provider_err:
+                logger.warning(f"Skipping unavailable web provider '{name}': {provider_err}")
+
+        active_providers = company_provider_names + web_provider_names
+        logger.info(f"Active discovery providers: {active_providers}")
         broadcast_progress(
             run_id,
             "discovering",
             20,
-            f"Searching target directory using {provider_name}..."
+            f"Searching available lead sources: {', '.join(active_providers) or 'none'}..."
         )
 
         # 1. Discovery Planner: derive search terms from specification if available
@@ -187,36 +204,99 @@ def discover_campaign_async(run_id: str):
                 except Exception as llm_err:
                     logger.error(f"Failed to optimize search keyword using LLM: {llm_err}")
 
-            logger.info(f"Running search for: \"{search_keyword}\" in \"{run.location}\" using provider \"{provider_name}\"...")
-            tool_result = executor.execute(
-                "search_companies",
-                {
-                    "query": search_keyword,
-                    "geography": run.location,
-                    "limit": 20,
-                    "provider": provider_name
-                },
-                context=context
-            )
+            for provider_name in company_provider_names:
+                logger.info(
+                    f"Running company search for: \"{search_keyword}\" in "
+                    f"\"{run.location}\" using provider \"{provider_name}\"..."
+                )
+                tool_result = executor.execute(
+                    "search_companies",
+                    {
+                        "query": search_keyword,
+                        "geography": run.location,
+                        "limit": 20,
+                        "provider": provider_name
+                    },
+                    context=context
+                )
 
-            if tool_result.success and tool_result.data:
-                for c in tool_result.data.get("companies", []):
-                    name_key = c["name"].lower().strip()
-                    web_key = c.get("website", "").lower().strip() if c.get("website") else ""
-                    lead_key = (name_key, web_key)
-                    if lead_key not in seen_lead_keys:
-                        seen_lead_keys.add(lead_key)
-                        discovered_leads.append(
-                            DiscoveryResultItem(
-                                name=c["name"],
-                                website=c.get("website"),
-                                phone=c.get("phone"),
-                                address=c.get("address"),
-                                category=c.get("category"),
-                                external_id=c.get("external_id"),
-                                raw_reference=c.get("raw_metadata", {})
-                            )
+                if not tool_result.success:
+                    logger.warning(f"Discovery provider '{provider_name}' failed; continuing to the next source.")
+                    continue
+
+                companies = (tool_result.data or {}).get("companies", [])
+                if not companies:
+                    logger.info(f"Discovery provider '{provider_name}' returned no results; continuing.")
+                    continue
+
+                logger.info(f"Discovery provider '{provider_name}' returned {len(companies)} results.")
+                for c in companies:
+                    name = (c.get("name") or "").strip()
+                    if not name:
+                        continue
+                    website = (c.get("website") or "").strip()
+                    lead_key = (name.lower(), website.lower())
+                    if lead_key in seen_lead_keys:
+                        continue
+                    seen_lead_keys.add(lead_key)
+                    metadata = dict(c.get("raw_metadata") or {})
+                    metadata.setdefault("source_provider", provider_name)
+                    discovered_leads.append(
+                        DiscoveryResultItem(
+                            name=name,
+                            website=website or None,
+                            phone=c.get("phone"),
+                            address=c.get("address"),
+                            category=c.get("category"),
+                            external_id=c.get("external_id"),
+                            raw_reference=metadata
                         )
+                    )
+
+            # Web-search providers have a different output schema, so run them
+            # through search_web and normalize links into discovery leads.
+            for provider_name in web_provider_names:
+                web_query = f"{search_keyword} in {run.location}"
+                logger.info(f"Running web search for: \"{web_query}\" using provider \"{provider_name}\"...")
+                tool_result = executor.execute(
+                    "search_web",
+                    {"query": web_query, "limit": 20},
+                    context=context
+                )
+
+                if not tool_result.success:
+                    logger.warning(f"Web provider '{provider_name}' failed; continuing to the next source.")
+                    continue
+
+                web_results = (tool_result.data or {}).get("results", [])
+                if not web_results:
+                    logger.info(f"Web provider '{provider_name}' returned no results; continuing.")
+                    continue
+
+                logger.info(f"Web provider '{provider_name}' returned {len(web_results)} results.")
+                for item in web_results:
+                    name = (item.get("name") or item.get("title") or "").strip()
+                    website = (item.get("url") or "").strip()
+                    if not name or not website:
+                        continue
+                    lead_key = (name.lower(), website.lower())
+                    if lead_key in seen_lead_keys:
+                        continue
+                    seen_lead_keys.add(lead_key)
+                    discovered_leads.append(
+                        DiscoveryResultItem(
+                            name=name,
+                            website=website,
+                            address=run.location or None,
+                            category="Web Search",
+                            external_id=website,
+                            raw_reference={
+                                "source_provider": provider_name,
+                                "title": item.get("title", ""),
+                                "snippet": item.get("snippet", "")
+                            }
+                        )
+                    )
         logger.info(f"Discovered {len(discovered_leads)} raw leads.")
 
         # 2. Entity Resolution & Deduplication

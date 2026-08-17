@@ -106,12 +106,14 @@ class CeleryTaskTestCase(TestCase):
             location="Manchester"
         )
 
+    @patch("llm.tools.executor.ToolExecutor.execute")
     @patch("prospecting.tasks.WebsiteAnalyzer")
     @patch("prospecting.tasks.ContactExtractor")
     @patch("prospecting.tasks.broadcast_progress")
     @patch("prospecting.tasks.broadcast_completion")
     def test_discover_campaign_async_flow(
-        self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor, mock_website_analyzer
+        self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor,
+        mock_website_analyzer, mock_execute
     ):
         mock_provider = MagicMock()
         mock_provider.health_check.return_value = True
@@ -129,10 +131,67 @@ class CeleryTaskTestCase(TestCase):
             ]
         )
 
+        mock_execute.return_value = type("ToolResult", (object,), {
+            "success": True,
+            "data": {
+                "companies": [{
+                    "name": "Pest Control Pro",
+                    "website": "https://pestcontrolpro.co.uk",
+                    "phone": "+441619999999",
+                    "address": "Manchester, UK",
+                    "category": "Pest Control",
+                    "external_id": "test-company-1",
+                    "raw_metadata": {}
+                }]
+            }
+        })()
+
         with patch.dict(discovery_provider_registry._providers, {"google_places": mock_provider}):
             result = discover_campaign_async(str(self.run.id))
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["leads_found"], 1)
+
+        called_tools = [call.args[0] for call in mock_execute.call_args_list]
+        self.assertIn("search_companies", called_tools)
+        self.assertIn("search_web", called_tools)
+
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.WebsiteAnalyzer")
+    @patch("prospecting.tasks.ContactExtractor")
+    @patch("prospecting.tasks.broadcast_progress")
+    @patch("prospecting.tasks.broadcast_completion")
+    def test_discovery_continues_to_duckduckgo_after_company_provider_failure(
+        self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor,
+        mock_website_analyzer, mock_execute
+    ):
+        def execute_side_effect(tool_name, arguments, context=None):
+            if tool_name == "search_web":
+                return type("ToolResult", (object,), {
+                    "success": True,
+                    "data": {
+                        "results": [{
+                            "title": "Manchester Pest Experts",
+                            "name": "Manchester Pest Experts",
+                            "url": "https://pest-experts.example",
+                            "snippet": "Local pest-control company"
+                        }]
+                    }
+                })()
+            return type("ToolResult", (object,), {
+                "success": False,
+                "data": None
+            })()
+
+        mock_execute.side_effect = execute_side_effect
+
+        result = discover_campaign_async(str(self.run.id))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["leads_found"], 1)
+        self.assertTrue(LeadCompany.objects.filter(name="Manchester Pest Experts").exists())
+        called_tools = [call.args[0] for call in mock_execute.call_args_list]
+        self.assertIn("search_companies", called_tools)
+        self.assertIn("search_web", called_tools)
 
 
 class StrategyFormulationTestCase(TestCase):
