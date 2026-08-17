@@ -359,3 +359,10 @@ class IntegrationFlowTestCase(TestCase):
             self.assertEqual(res_status.data["metrics"]["discovered"], 1)
             self.assertEqual(res_status.data["metrics"]["new"], 1)
             self.assertEqual(res_status.data["metrics"]["duplicates"], 0)
+
+            # The Discovery UUID returned by the intake workflow remains a
+            # supported status identifier for backwards-compatible clients.
+            discovery_status_url = reverse('prospecting-discover-status', kwargs={'pk': discovery.id})
+            res_discovery_status = self.client.get(discovery_status_url)
+            self.assertEqual(res_discovery_status.status_code, 200)
+            self.assertEqual(res_discovery_status.data["run_id"], str(run.id))

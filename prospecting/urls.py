@@ -14,7 +14,9 @@ from .views import (
     ProspectingIntakeAPIView, ProspectingIntakeDetailAPIView, ProspectingIntakeParseAPIView,
     ProspectingIntakeClarifyAPIView, ProspectingIntakeSpecificationAPIView,
     ProspectingIntakeConfirmAPIView, ProspectingIntakeCancelAPIView,
-    ProspectingDiscoverStatusAPIView
+    ProspectingDiscoverStatusAPIView,
+    ProspectingCampaignListAPIView, ProspectingCampaignDetailAPIView,
+    ProspectingCampaignLeadsAPIView
 )
 
 urlpatterns = [
@@ -42,6 +44,9 @@ urlpatterns = [
     path('lists/', TargetListListCreateAPIView.as_view(), name='target-lists-list'),
     path('lists/<uuid:pk>/', TargetListDetailAPIView.as_view(), name='target-lists-detail'),
     path('campaigns/enrollments/', CampaignEnrollmentAPIView.as_view(), name='campaign-enrollments'),
+    path('campaigns/', ProspectingCampaignListAPIView.as_view(), name='prospecting-campaigns-list'),
+    path('campaigns/<uuid:pk>/', ProspectingCampaignDetailAPIView.as_view(), name='prospecting-campaign-detail'),
+    path('campaigns/<uuid:pk>/leads/', ProspectingCampaignLeadsAPIView.as_view(), name='prospecting-campaign-leads'),
     path('emails/sequences/', EmailSequenceListCreateAPIView.as_view(), name='email-sequences-list'),
     path('emails/messages/', EmailMessageListCreateAPIView.as_view(), name='email-messages-list'),
     path('emails/messages/<uuid:pk>/send/', EmailMessageSendAPIView.as_view(), name='email-messages-send'),

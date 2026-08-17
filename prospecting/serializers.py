@@ -1,10 +1,35 @@
 from rest_framework import serializers
+from django.db.models import Q
 from prospecting.models import (
     ProblemSignal, LeadCompany, Evidence, CompanySignal, 
     Person, ContactPoint, BuyingGroupMember, TargetList, 
-    CampaignEnrollment, SalesGuidance, EmailSequence, EmailMessage, 
+    ProspectingCampaign, CampaignEnrollment, SalesGuidance, EmailSequence, EmailMessage,
     EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback, CRMIntegrationRecord
 )
+
+
+class ProspectingCampaignSerializer(serializers.ModelSerializer):
+    lead_count = serializers.SerializerMethodField()
+    discovery_run_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProspectingCampaign
+        fields = [
+            'id', 'name', 'description', 'product_description',
+            'problem_statement', 'geography', 'status', 'lead_count',
+            'discovery_run_count', 'created_at', 'updated_at'
+        ]
+        read_only_fields = fields
+
+    def get_lead_count(self, obj):
+        return LeadCompany.objects.filter(
+            Q(campaign=obj) |
+            Q(discovery_run__campaign=obj) |
+            Q(discovery_leads__discovery_run__campaign=obj)
+        ).distinct().count()
+
+    def get_discovery_run_count(self, obj):
+        return obj.discovery_runs.count()
 
 class ProblemSignalSerializer(serializers.ModelSerializer):
     class Meta:

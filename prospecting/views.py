@@ -18,7 +18,7 @@ from prospecting.serializers import (
     CompanySignalSerializer, PersonSerializer, BuyingGroupMemberSerializer,
     TargetListSerializer, CampaignEnrollmentSerializer, SalesGuidanceSerializer,
     EmailSequenceSerializer, EmailMessageSerializer, InboundReplySerializer, LeadFeedbackSerializer,
-    CRMIntegrationRecordSerializer
+    CRMIntegrationRecordSerializer, ProspectingCampaignSerializer
 )
 from prospecting.discovery.engine import BusinessDiscoveryEngine
 from prospecting.contact import ContactExtractor
@@ -90,6 +90,7 @@ class ProspectingLeadsAPIView(APIView):
         score_min = request.query_params.get("score_min")
         location = request.query_params.get("location")
         category = request.query_params.get("category")
+        campaign_id = getattr(request, 'campaign_id', None) or request.query_params.get("campaign_id")
         
         # 2. Fetch pagination params
         try:
@@ -116,6 +117,12 @@ class ProspectingLeadsAPIView(APIView):
             queryset = queryset.filter(address__icontains=location.strip())
         if category and category.strip():
             queryset = queryset.filter(category__iexact=category.strip())
+        if campaign_id and campaign_id.strip():
+            queryset = queryset.filter(
+                Q(campaign_id=campaign_id.strip()) |
+                Q(discovery_run__campaign_id=campaign_id.strip()) |
+                Q(discovery_leads__discovery_run__campaign_id=campaign_id.strip())
+            ).distinct()
             
         queryset = queryset.order_by('-created_at', 'name')
         
@@ -175,6 +182,53 @@ class ProspectingLeadsAPIView(APIView):
             "total_pages": total_pages,
             "categories": unique_categories
         }, status=status.HTTP_200_OK)
+
+
+class ProspectingCampaignListAPIView(APIView):
+    """List campaigns in the current workspace."""
+
+    def get(self, request):
+        campaigns = (
+            ProspectingCampaign.objects
+            .filter(workspace=get_default_workspace())
+            .prefetch_related('companies', 'discovery_runs')
+            .order_by('-created_at')
+        )
+        serializer = ProspectingCampaignSerializer(campaigns, many=True)
+        return Response({"campaigns": serializer.data}, status=status.HTTP_200_OK)
+
+
+class ProspectingCampaignDetailAPIView(APIView):
+    """Retrieve one campaign in the current workspace."""
+
+    def get(self, request, pk):
+        try:
+            campaign = (
+                ProspectingCampaign.objects
+                .prefetch_related('companies', 'discovery_runs')
+                .get(id=pk, workspace=get_default_workspace())
+            )
+        except ProspectingCampaign.DoesNotExist:
+            return Response({"error": "Campaign not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(
+            ProspectingCampaignSerializer(campaign).data,
+            status=status.HTTP_200_OK
+        )
+
+
+class ProspectingCampaignLeadsAPIView(ProspectingLeadsAPIView):
+    """List leads belonging to one campaign, with standard lead filters and pagination."""
+
+    def get(self, request, pk):
+        if not ProspectingCampaign.objects.filter(
+            id=pk,
+            workspace=get_default_workspace()
+        ).exists():
+            return Response({"error": "Campaign not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        request.campaign_id = str(pk)
+        return super().get(request)
 
 
 class ProspectingResetAPIView(APIView):
@@ -981,9 +1035,11 @@ class ProspectingIntakeConfirmAPIView(APIView):
                 return Response({"error": "version is required"}, status=status.HTTP_400_BAD_REQUEST)
 
             discovery = ProspectingIntentService.confirm_specification(str(req.id), int(version), user)
+            run = discovery.runs.order_by('-started_at').first()
             return Response({
                 "message": "Specification confirmed and discovery run dispatched successfully.",
-                "discovery": DiscoverySerializer(discovery).data
+                "discovery": DiscoverySerializer(discovery).data,
+                "run_id": str(run.id) if run else None,
             }, status=status.HTTP_200_OK)
         except ProspectingRequest.DoesNotExist:
             return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -1019,7 +1075,17 @@ class ProspectingDiscoverStatusAPIView(APIView):
         try:
             run = DiscoveryRun.objects.get(id=pk, user_profile=user)
         except DiscoveryRun.DoesNotExist:
-            return Response({"error": "Discovery run not found"}, status=status.HTTP_404_NOT_FOUND)
+            # Intake confirmation historically returned a Discovery UUID, while
+            # this endpoint expects a DiscoveryRun UUID. Accept both identifiers
+            # so clients created against the old response continue to work.
+            run = (
+                DiscoveryRun.objects
+                .filter(discovery_id=pk, user_profile=user)
+                .order_by('-started_at')
+                .first()
+            )
+            if run is None:
+                return Response({"error": "Discovery run not found"}, status=status.HTTP_404_NOT_FOUND)
 
         # 1. Read real-time progress from cache
         progress_data = cache.get(f"discovery_run:{run.id}:progress")
