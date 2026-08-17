@@ -1,5 +1,6 @@
 import time
 import logging
+import json
 from typing import Optional, Any
 from pydantic import ValidationError
 
@@ -83,6 +84,13 @@ class ToolExecutor:
                         duration_ms=duration_ms
                     )
 
+            logger.info(
+                "TOOL_REQUEST tool=%s run_id=%s arguments=%s",
+                tool_name,
+                getattr(context, "run_id", None) if context else None,
+                json.dumps(self._sanitize_data(validated_args), default=str, ensure_ascii=False),
+            )
+
             # 4. Execute the Tool
             # Inject context if accepted/expected by the tool
             execute_kwargs = {**validated_args}
@@ -138,6 +146,15 @@ class ToolExecutor:
             )
 
         # 6. Audit Logging to the Database
+        output_val = result.data if result.success else (result.error.model_dump() if result.error else {})
+        logger.info(
+            "TOOL_RESPONSE tool=%s provider=%s success=%s duration_ms=%s data=%s",
+            tool_name,
+            result.provider,
+            result.success,
+            result.duration_ms,
+            json.dumps(self._sanitize_data(output_val), default=str, ensure_ascii=False),
+        )
         self._audit_execution(tool_name, arguments, result, context)
 
         return result

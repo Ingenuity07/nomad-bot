@@ -17,10 +17,11 @@ class OSMCompanyDiscoveryProvider(CompanyDiscoveryProvider):
         headers = {"User-Agent": "NomadProspectingEngine/1.0 (contact: support@visiofytech.com)"}
 
         try:
-            logger.info(f"OSM query search: {query_str}")
+            logger.info("PROVIDER_REQUEST provider=openstreetmap query=%r limit=%s", query_str, limit)
             res = requests.get(osm_url, headers=headers, timeout=8)
             if res.status_code == 200:
                 data = res.json()
+                logger.info("PROVIDER_RAW_RESPONSE provider=openstreetmap query=%r result_count=%s data=%s", query_str, len(data), data)
                 for item in data[:limit]:
                     name = item.get("display_name", "").split(",")[0].strip()
                     address = item.get("display_name", "")
@@ -38,6 +39,8 @@ class OSMCompanyDiscoveryProvider(CompanyDiscoveryProvider):
                                 raw_metadata=item
                             )
                         )
+            else:
+                logger.warning("PROVIDER_RESPONSE provider=openstreetmap query=%r status=%s body_preview=%r", query_str, res.status_code, res.text[:500])
         except Exception as e:
             logger.error(f"OSM Nominatim API request failed: {e}")
             

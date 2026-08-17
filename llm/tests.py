@@ -1,4 +1,6 @@
 from django.test import TestCase
+from unittest.mock import MagicMock, patch
+import requests
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional
 
@@ -12,8 +14,10 @@ from llm.tools.implementations.discovery_tools import (
     SearchWebTool,
     ExtractContactDataTool
 )
+from llm.providers.duckduckgo import DuckDuckGoSearchProvider
 from llm.providers.registry import provider_registry
 from llm.providers.base import CompanyDiscoveryProvider, CompanyCandidate
+from llm.gemini_api import GeminiAPIProvider
 
 # =====================================================================
 # Dummy tools and models for testing platform behaviors
@@ -107,6 +111,20 @@ class ToolPlatformTestCase(TestCase):
         self.assertFalse(res_fail.success)
         self.assertEqual(res_fail.error.code, "VALIDATION_FAILED")
 
+    @patch("llm.providers.duckduckgo.requests.post")
+    def test_duckduckgo_parses_html_results(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.text = '''
+            <div class="result">
+              <h2><a class="result__a" href="https://example.com">Example Pest Control</a></h2>
+              <div class="result__snippet">Local pest control company</div>
+            </div>
+        '''
+        results = DuckDuckGoSearchProvider().search_web("pest control Manchester", limit=10)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["url"], "https://example.com")
+        self.assertEqual(results[0]["snippet"], "Local pest control company")
+
     def test_read_only_policy_blocks_write_tools(self):
         self.registry.register(DummyWriteTool())
         
@@ -193,3 +211,43 @@ class ToolPlatformTestCase(TestCase):
         # OpenAPI schema endpoint
         response = self.client.get('/api/schema/')
         self.assertEqual(response.status_code, 200)
+
+
+class GeminiReliabilityTestCase(TestCase):
+    @patch("llm.gemini_api.requests.post")
+    def test_gemini_error_preserves_http_status_and_message(self, mock_post):
+        response = MagicMock()
+        response.status_code = 503
+        response.headers = {"Retry-After": "4"}
+        response.json.return_value = {
+            "error": {"message": "The model is temporarily overloaded"}
+        }
+        response.raise_for_status.side_effect = requests.HTTPError(
+            "503 Server Error", response=response
+        )
+        mock_post.return_value = response
+
+        result = GeminiAPIProvider(api_key="test-key").generate("hello")
+
+        self.assertEqual(result["type"], "error")
+        self.assertEqual(result["status_code"], 503)
+        self.assertEqual(result["retry_after"], "4")
+        self.assertIn("temporarily overloaded", result["text"])
+
+    @patch("time.sleep")
+    def test_router_retries_503_three_times(self, mock_sleep):
+        from llm.router import IntelligentRouter
+
+        adapter = MagicMock()
+        adapter.generate.return_value = {
+            "type": "error",
+            "text": "Service unavailable",
+            "status_code": 503
+        }
+        router = IntelligentRouter.__new__(IntelligentRouter)
+
+        result = router._generate_with_logging("gemini-flash", adapter, "hello", "", None)
+
+        self.assertEqual(result["status_code"], 503)
+        self.assertEqual(adapter.generate.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)

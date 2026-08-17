@@ -16,7 +16,7 @@ from prospecting.discovery.dto import DiscoveryRequest, DiscoveryResult, Discove
 from prospecting.discovery.normalizer import Normalizer
 from prospecting.discovery.deduplication import Deduplicator
 from prospecting.discovery.providers.registry import discovery_provider_registry
-from prospecting.tasks import discover_campaign_async
+from prospecting.tasks import discover_campaign_async, build_duckduckgo_queries
 from prospecting.workflows.graphs import strategy_formulator_graph
 from prospecting.workflows.research_graph import website_research_graph
 from prospecting.qualification.scoring import OverallQualificationScorer
@@ -38,6 +38,12 @@ def get_default_workspace():
 
 
 class DiscoveryDTOTestCase(TestCase):
+    def test_duckduckgo_queries_are_short_and_have_fallbacks(self):
+        queries = build_duckduckgo_queries("pest control", "Manchester, UK")
+        self.assertEqual(queries[0], '\"pest control\" \"Manchester, UK\"')
+        self.assertIn("companies", queries[1])
+        self.assertIn("directory", queries[2])
+
     def test_valid_request(self):
         req = DiscoveryRequest(
             query="pest control",

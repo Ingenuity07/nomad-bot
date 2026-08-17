@@ -67,21 +67,49 @@ class IntelligentRouter(BaseLLMProvider):
         
         start_time = time.time()
         result = {"type": "error", "text": "Timeout or failed call"}
+        logger.info(
+            "LLM_REQUEST provider=%s model=%s system_prompt=%r prompt=%r tools=%s",
+            provider_key,
+            getattr(adapter, "model_name", provider_key),
+            system_prompt,
+            prompt,
+            tools or [],
+        )
         
-        # Retry up to 3 times on rate limiting (429)
+        # Retry transient upstream failures before moving to the next provider.
+        retryable_statuses = {408, 429, 500, 502, 503, 504}
         for attempt in range(3):
             result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
             if result.get("type") == "error":
                 err_text = result.get("text", "")
-                status_code = result.get("status_code", 500)
-                if "429" in err_text or "too many requests" in err_text.lower() or status_code == 429:
-                    wait_sec = (attempt + 1) * 3
-                    logger.warning(f"Provider '{provider_key}' returned 429 rate limit. Retrying in {wait_sec}s...")
+                status_code = result.get("status_code")
+                is_transient = (
+                    status_code in retryable_statuses
+                    or "too many requests" in err_text.lower()
+                    or "service unavailable" in err_text.lower()
+                )
+                if is_transient and attempt < 2:
+                    retry_after = result.get("retry_after")
+                    try:
+                        wait_sec = max(1, min(int(retry_after), 30)) if retry_after else 2 ** attempt
+                    except (TypeError, ValueError):
+                        wait_sec = 2 ** attempt
+                    logger.warning(
+                        f"Provider '{provider_key}' returned transient status {status_code}. "
+                        f"Retrying in {wait_sec}s (attempt {attempt + 2}/3)..."
+                    )
                     time.sleep(wait_sec)
                     continue
             break
 
         latency_ms = int((time.time() - start_time) * 1000)
+        logger.info(
+            "LLM_RESPONSE provider=%s model=%s latency_ms=%s response=%s",
+            provider_key,
+            getattr(adapter, "model_name", provider_key),
+            latency_ms,
+            json.dumps(result, default=str, ensure_ascii=False),
+        )
         
         if result.get("type") != "error":
             input_tokens = result.get("prompt_tokens") or 0

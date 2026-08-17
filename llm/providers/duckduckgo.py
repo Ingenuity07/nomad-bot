@@ -13,15 +13,18 @@ class DuckDuckGoSearchProvider(WebSearchProvider):
 
     def search_web(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
         leads = []
-        ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+        ddg_url = "https://html.duckduckgo.com/html/"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
         try:
-            res = requests.get(ddg_url, headers=headers, timeout=8)
+            logger.info("PROVIDER_REQUEST provider=duckduckgo query=%r limit=%s", query, limit)
+            # POST is the form used by DDG's HTML endpoint and is less brittle than
+            # embedding long prospecting queries in the URL.
+            res = requests.post(ddg_url, data={"q": query}, headers=headers, timeout=12)
             logger.info(f"DuckDuckGo search HTTP response: {res.status_code} for query: {query}")
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
-                links = soup.find_all("a", class_="result__a")
+                links = soup.select("a.result__a, a.result-link")
                 for link in links[:limit]:
                     title = link.text.strip()
                     raw_href = link.get("href", "")
@@ -36,11 +39,20 @@ class DuckDuckGoSearchProvider(WebSearchProvider):
                             "title": title,
                             "name": title.split("-")[0].split("|")[0].strip(),
                             "url": href,
-                            "snippet": link.parent.find_next_sibling("div", class_="result__snippet").text.strip() if link.parent else ""
+                            "snippet": self._extract_snippet(link)
                         })
+                logger.info("PROVIDER_RESPONSE provider=duckduckgo query=%r result_count=%s results=%s", query, len(leads), leads)
+            else:
+                logger.warning("PROVIDER_RESPONSE provider=duckduckgo query=%r status=%s body_preview=%r", query, res.status_code, res.text[:500])
         except Exception as e:
             logger.error(f"DuckDuckGo search query '{query}' failed: {e}")
         return leads
+
+    @staticmethod
+    def _extract_snippet(link) -> str:
+        result = link.find_parent(class_="result")
+        snippet = result.select_one(".result__snippet") if result else None
+        return snippet.get_text(" ", strip=True) if snippet else ""
 
     def _extract_real_url(self, href: str) -> str:
         if not href:

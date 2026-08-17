@@ -62,10 +62,11 @@ class GooglePlacesProvider(BusinessDiscoveryProvider):
 
         for attempt in range(retries):
             try:
-                logger.info(f"Google Places API request query: '{query_str}' (Attempt {attempt + 1})")
+                logger.info("PROVIDER_REQUEST provider=google_places query=%r payload=%s attempt=%s", query_str, payload, attempt + 1)
                 res = requests.post(url, json=payload, headers=headers, timeout=10)
                 if res.status_code == 200:
                     response = res.json()
+                    logger.info("PROVIDER_RAW_RESPONSE provider=google_places query=%r result_count=%s data=%s", query_str, len(response.get("places", [])), response)
                     break
                 elif res.status_code in [429, 500, 503]:
                     logger.warning(f"Transient error from Google Places ({res.status_code}). Retrying...")

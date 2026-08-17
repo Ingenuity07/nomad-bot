@@ -48,7 +48,7 @@ class GeminiAPIProvider(BaseLLMProvider):
         }
         
         try:
-            response = requests.post(self.url, headers=headers, json=payload)
+            response = requests.post(self.url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
             
             data = response.json()
@@ -99,7 +99,22 @@ class GeminiAPIProvider(BaseLLMProvider):
                 }
                 
         except requests.exceptions.RequestException as e:
+            response = getattr(e, "response", None)
+            status_code = response.status_code if response is not None else 500
+            retry_after = None
+            api_message = str(e)
+
+            if response is not None:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    error_payload = response.json()
+                    api_message = error_payload.get("error", {}).get("message") or api_message
+                except (ValueError, AttributeError):
+                    pass
+
             return {
                 "type": "error",
-                "text": f"Error calling Gemini REST API: {str(e)}"
+                "text": f"Error calling Gemini REST API ({status_code}): {api_message}",
+                "status_code": status_code,
+                "retry_after": retry_after
             }

@@ -107,3 +107,9 @@ Validate that the setup is fully correct by executing the test suite:
 ```bash
 python manage.py test api.v3_tests
 ```
+
+
+wsl -d Ubuntu
+
+python -m celery -A config worker --loglevel=INFO^C      
+python -m celery -A config beat --loglevel=INFO^C      

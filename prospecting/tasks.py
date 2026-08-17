@@ -15,6 +15,22 @@ from prospecting.analyzer import WebsiteAnalyzer
 
 logger = logging.getLogger(__name__)
 
+
+def build_duckduckgo_queries(category: str, location: str) -> List[str]:
+    """Build concise, high-recall lead-generation queries in fallback order."""
+    category = " ".join((category or "").split()).strip(' "')
+    location = " ".join((location or "").split()).strip(' "')
+    if not category:
+        return []
+    location_suffix = f' "{location}"' if location else ""
+    queries = [
+        f'"{category}"{location_suffix}',
+        f'{category} companies{location_suffix}',
+        f'{category} directory{location_suffix}',
+    ]
+    # Preserve order while removing duplicates caused by unusual empty inputs.
+    return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
+
 def broadcast_progress(run_id: str, stage: str, progress: int, message: str):
     cache.set(f"discovery_run:{run_id}:progress", {
         "stage": stage,
@@ -160,12 +176,18 @@ def discover_campaign_async(run_id: str):
                     import json
                     router = IntelligentRouter()
                     planner_prompt = (
-                        f"Based on the target description: \"{spec.target.description.value}\" "
-                        f"and objective: \"{spec.objective.value}\", generate a JSON list of 2 to 3 optimized, "
-                        "short search keyword terms (e.g., 'pest control', 'courier service') to find matching companies. "
-                        "Return a JSON object with key 'search_queries'."
+                        "Create 2 to 3 lead-discovery business category terms from the inputs below. "
+                        "Each term must be 1 to 4 words, name a business type that companies publicly use, "
+                        "and contain no location, sales language, product features, pain points, questions, "
+                        "Boolean operators, or words such as leads, best, near me, company, or business. "
+                        "Prefer broad standard categories over niche prose (examples: pest control, courier service, dental clinic).\n"
+                        f"Target description: {spec.target.description.value}\n"
+                        f"Objective: {spec.objective.value}\n"
+                        'Return only JSON: {"search_queries":["category one","category two"]}.'
                     )
+                    logger.info("SEARCH_PLANNER_PROMPT prompt=%r", planner_prompt)
                     res = router.generate(prompt=planner_prompt, system_prompt="You are a helpful search optimization planner. Respond in raw JSON.")
+                    logger.info("SEARCH_PLANNER_RESPONSE response=%s", res)
                     if res.get("type") == "text":
                         parsed = json.loads(res.get("text", "{}"))
                         search_keywords = parsed.get("search_queries", [])
@@ -190,12 +212,15 @@ def discover_campaign_async(run_id: str):
                     import json
                     router = IntelligentRouter()
                     prompt = (
-                        "Extract 1 to 2 clean, short, standard business categories or search keywords (e.g., 'courier', 'logistics', 'delivery service') "
-                        "from the following product or business pain point description:\n\n"
-                        f"\"{search_keyword}\"\n\n"
-                        "Return a JSON object with a single key 'keywords' containing a list of strings."
+                        "Extract 1 to 2 business categories suitable for a local directory or web search. "
+                        "Use 1 to 4 words per category. Do not include product features, pain-point prose, "
+                        "locations, questions, Boolean operators, or sales words. "
+                        f"Input: {search_keyword}\n"
+                        'Return only JSON: {"keywords":["category one","category two"]}.'
                     )
+                    logger.info("SEARCH_OPTIMIZER_PROMPT prompt=%r", prompt)
                     res = router.generate(prompt, system_prompt="You are a helpful keyword extraction assistant. Respond in raw JSON.")
+                    logger.info("SEARCH_OPTIMIZER_RESPONSE response=%s", res)
                     if res.get("type") == "text":
                         parsed = json.loads(res.get("text", "{}"))
                         extracted = parsed.get("keywords", [])
@@ -256,21 +281,24 @@ def discover_campaign_async(run_id: str):
             # Web-search providers have a different output schema, so run them
             # through search_web and normalize links into discovery leads.
             for provider_name in web_provider_names:
-                web_query = f"{search_keyword} in {run.location}"
-                logger.info(f"Running web search for: \"{web_query}\" using provider \"{provider_name}\"...")
-                tool_result = executor.execute(
-                    "search_web",
-                    {"query": web_query, "limit": 20},
-                    context=context
-                )
+                web_results = []
+                for query_number, web_query in enumerate(build_duckduckgo_queries(search_keyword, run.location), start=1):
+                    logger.info("Running web search query %s: %r using provider %r", query_number, web_query, provider_name)
+                    tool_result = executor.execute(
+                        "search_web",
+                        {"query": web_query, "limit": 20},
+                        context=context
+                    )
+                    if not tool_result.success:
+                        logger.warning("Web provider %r failed for query %r; trying fallback query.", provider_name, web_query)
+                        continue
+                    web_results = (tool_result.data or {}).get("results", [])
+                    if web_results:
+                        break
+                    logger.info("Web provider %r returned zero results for query %r; trying fallback query.", provider_name, web_query)
 
-                if not tool_result.success:
-                    logger.warning(f"Web provider '{provider_name}' failed; continuing to the next source.")
-                    continue
-
-                web_results = (tool_result.data or {}).get("results", [])
                 if not web_results:
-                    logger.info(f"Web provider '{provider_name}' returned no results; continuing.")
+                    logger.info("Web provider %r exhausted all query variants with zero results.", provider_name)
                     continue
 
                 logger.info(f"Web provider '{provider_name}' returned {len(web_results)} results.")
