@@ -1,6 +1,7 @@
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
+from unittest.mock import patch
 
 from knowledge_base.models import UserProfile
 from prospecting.models import (
@@ -8,9 +9,13 @@ from prospecting.models import (
     DiscoveryLead,
     LeadCompany,
     ProspectingCampaign,
+    ProspectingRequest,
+    ProspectingSpecificationVersion,
     Workspace,
     get_default_workspace,
 )
+from prospecting.intent.schemas import ProspectingSpecification
+from prospecting.intent.service import ProspectingIntentService
 
 
 class ProspectingCampaignAPITests(APITestCase):
@@ -109,3 +114,82 @@ class ProspectingCampaignAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["total_count"], 1)
         self.assertEqual(response.data["leads"][0]["name"], "Discovery Run Lead")
+
+
+class CampaignPopulationTests(APITestCase):
+    def setUp(self):
+        self.user = UserProfile.objects.create(
+            username="campaign_population_user",
+            email="campaign-population@example.com",
+        )
+
+    @patch('prospecting.views.discover_campaign_async')
+    def test_basic_discovery_creates_and_links_campaign(self, mock_discover):
+        mock_discover.return_value = {"status": "completed", "leads_found": 0}
+        response = self.client.post(
+            reverse('prospecting-discover'),
+            {"keyword": "Roofing contractors", "location": "Bristol"},
+            format='json',
+        )
+
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_200_OK, status.HTTP_201_CREATED),
+        )
+        run = DiscoveryRun.objects.get(id=response.data['run_id'])
+        self.assertIsNotNone(run.campaign_id)
+        self.assertEqual(run.campaign.name, "Roofing contractors")
+        self.assertEqual(run.campaign.status, "ACTIVE")
+
+    @patch('prospecting.tasks.discover_campaign_async.delay')
+    def test_intake_confirmation_creates_campaign_for_request(self, mock_delay):
+        request = ProspectingRequest.objects.create(
+            user_profile=self.user,
+            raw_objective="Sell routing software",
+            raw_target="Courier companies",
+            raw_qualification="Operates a delivery fleet",
+            status="READY_FOR_REVIEW",
+        )
+        specification = ProspectingSpecification()
+        specification.objective.value = "Find courier prospects"
+        specification.target.description.value = "Courier companies"
+        specification.problem_hypothesis.solution_or_offering.value = "Routing software"
+        specification.problem_hypothesis.problem.value = "Manual route planning"
+        specification.geography.cities.value = ["Leeds"]
+        ProspectingSpecificationVersion.objects.create(
+            request=request,
+            version=1,
+            specification_json=specification.model_dump(),
+            status="READY_FOR_REVIEW",
+        )
+
+        discovery = ProspectingIntentService.confirm_specification(
+            str(request.id), 1, self.user
+        )
+        run = discovery.runs.get()
+
+        self.assertIsNotNone(run.campaign_id)
+        self.assertEqual(run.campaign.prospecting_request_id, request.id)
+        self.assertEqual(run.campaign.product_description, "Routing software")
+        self.assertEqual(run.campaign.problem_statement, "Manual route planning")
+        self.assertEqual(run.campaign.geography["cities"], ["Leeds"])
+
+    def test_new_lead_inherits_discovery_run_campaign(self):
+        campaign = ProspectingCampaign.objects.create(
+            workspace=get_default_workspace(),
+            name="Inherited Campaign",
+            product_description="Product",
+            problem_statement="Problem",
+            created_by=self.user,
+        )
+        run = DiscoveryRun.objects.create(
+            user_profile=self.user,
+            campaign=campaign,
+            keyword="Accountants",
+            location="London",
+        )
+
+        from prospecting.repositories import LeadCompanyRepository
+        company = LeadCompanyRepository.create_company(run, "Example Ltd")
+
+        self.assertEqual(company.campaign_id, campaign.id)

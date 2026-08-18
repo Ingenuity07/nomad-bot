@@ -3,9 +3,73 @@ from django.db.models import Q
 from prospecting.models import (
     ProblemSignal, LeadCompany, Evidence, CompanySignal, 
     Person, ContactPoint, BuyingGroupMember, TargetList, 
-    ProspectingCampaign, CampaignEnrollment, SalesGuidance, EmailSequence, EmailMessage,
+    DiscoveryRun, ProspectingCampaign, CampaignEnrollment, SalesGuidance, EmailSequence, EmailMessage,
     EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback, CRMIntegrationRecord
 )
+
+
+class DiscoveryRunSerializer(serializers.ModelSerializer):
+    lead_count = serializers.SerializerMethodField()
+    new_lead_count = serializers.SerializerMethodField()
+    duplicate_lead_count = serializers.SerializerMethodField()
+    campaign = serializers.SerializerMethodField()
+    prospecting_request = serializers.SerializerMethodField()
+    specification_version = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DiscoveryRun
+        fields = [
+            'id', 'keyword', 'location', 'status', 'total_leads_found',
+            'lead_count', 'new_lead_count', 'duplicate_lead_count',
+            'campaign', 'prospecting_request', 'specification_version',
+            'started_at', 'completed_at'
+        ]
+        read_only_fields = fields
+
+    def _lead_queryset(self, obj):
+        return LeadCompany.objects.filter(
+            Q(discovery_run=obj) | Q(discovery_leads__discovery_run=obj)
+        ).distinct()
+
+    def get_lead_count(self, obj):
+        return self._lead_queryset(obj).count()
+
+    def get_new_lead_count(self, obj):
+        return obj.companies.count()
+
+    def get_duplicate_lead_count(self, obj):
+        return self._lead_queryset(obj).exclude(discovery_run=obj).count()
+
+    def get_campaign(self, obj):
+        if not obj.campaign_id:
+            return None
+        return {
+            'id': str(obj.campaign_id),
+            'name': obj.campaign.name,
+            'status': obj.campaign.status,
+        }
+
+    def get_prospecting_request(self, obj):
+        if not obj.prospecting_request_id:
+            return None
+        request = obj.prospecting_request
+        return {
+            'id': str(request.id),
+            'status': request.status,
+            'objective': request.raw_objective,
+            'target': request.raw_target,
+            'qualification': request.raw_qualification,
+        }
+
+    def get_specification_version(self, obj):
+        if not obj.specification_version_id:
+            return None
+        specification = obj.specification_version
+        return {
+            'id': str(specification.id),
+            'version': specification.version,
+            'status': specification.status,
+        }
 
 
 class ProspectingCampaignSerializer(serializers.ModelSerializer):
@@ -17,7 +81,7 @@ class ProspectingCampaignSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'product_description',
             'problem_statement', 'geography', 'status', 'lead_count',
-            'discovery_run_count', 'created_at', 'updated_at'
+            'discovery_run_count', 'prospecting_request', 'created_at', 'updated_at'
         ]
         read_only_fields = fields
 

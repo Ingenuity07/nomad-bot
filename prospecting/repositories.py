@@ -50,6 +50,7 @@ class LeadCompanyRepository:
     ) -> LeadCompany:
         return LeadCompany.objects.create(
             discovery_run=discovery_run,
+            campaign=discovery_run.campaign,
             name=name[:255] if name else "Unknown",
             website=website[:2000] if website else None,
             phone=phone[:100] if phone else None,

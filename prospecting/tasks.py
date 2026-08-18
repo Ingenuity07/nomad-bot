@@ -106,6 +106,11 @@ def discover_campaign_async(run_id: str):
         raise DiscoveryError(f"Discovery run {run_id} not found.")
 
     try:
+        # Keep every execution grouped even when a run was created by legacy
+        # code or an internal caller that omitted a campaign explicitly.
+        from prospecting.campaigns import ensure_campaign_for_run
+        ensure_campaign_for_run(run)
+
         run.status = 'running'
         run.save()
 

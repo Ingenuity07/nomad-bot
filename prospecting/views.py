@@ -18,7 +18,8 @@ from prospecting.serializers import (
     CompanySignalSerializer, PersonSerializer, BuyingGroupMemberSerializer,
     TargetListSerializer, CampaignEnrollmentSerializer, SalesGuidanceSerializer,
     EmailSequenceSerializer, EmailMessageSerializer, InboundReplySerializer, LeadFeedbackSerializer,
-    CRMIntegrationRecordSerializer, ProspectingCampaignSerializer
+    CRMIntegrationRecordSerializer, ProspectingCampaignSerializer,
+    DiscoveryRunSerializer
 )
 from prospecting.discovery.engine import BusinessDiscoveryEngine
 from prospecting.contact import ContactExtractor
@@ -36,6 +37,7 @@ def get_default_user():
     return user
 
 from prospecting.tasks import discover_campaign_async
+from prospecting.campaigns import ensure_campaign_for_run
 
 class ProspectingDiscoverAPIView(APIView):
     """Trigger a new Lead Generation discovery and qualification run."""
@@ -55,6 +57,7 @@ class ProspectingDiscoverAPIView(APIView):
             location=location,
             status='pending'
         )
+        ensure_campaign_for_run(run, user=user)
 
         try:
             is_dev = os.environ.get("DEV", "False").lower() in ("true", "1", "yes")
@@ -91,6 +94,7 @@ class ProspectingLeadsAPIView(APIView):
         location = request.query_params.get("location")
         category = request.query_params.get("category")
         campaign_id = getattr(request, 'campaign_id', None) or request.query_params.get("campaign_id")
+        run_id = getattr(request, 'run_id', None) or request.query_params.get("run_id")
         
         # 2. Fetch pagination params
         try:
@@ -105,6 +109,7 @@ class ProspectingLeadsAPIView(APIView):
         queryset = LeadCompany.objects.filter(
             Q(campaign__workspace=workspace) |
             Q(discovery_run__campaign__workspace=workspace) |
+            Q(discovery_leads__discovery_run__campaign__workspace=workspace) |
             Q(campaign__isnull=True, discovery_run__campaign__isnull=True)
         ).distinct()
         
@@ -122,6 +127,11 @@ class ProspectingLeadsAPIView(APIView):
                 Q(campaign_id=campaign_id.strip()) |
                 Q(discovery_run__campaign_id=campaign_id.strip()) |
                 Q(discovery_leads__discovery_run__campaign_id=campaign_id.strip())
+            ).distinct()
+        if run_id and run_id.strip():
+            queryset = queryset.filter(
+                Q(discovery_run_id=run_id.strip()) |
+                Q(discovery_leads__discovery_run_id=run_id.strip())
             ).distinct()
             
         queryset = queryset.order_by('-created_at', 'name')
@@ -171,7 +181,7 @@ class ProspectingLeadsAPIView(APIView):
             })
 
         # Dynamically fetch distinct list of non-empty categories in CRM for filter dropdowns
-        unique_categories = list(LeadCompany.objects.values_list('category', flat=True).distinct())
+        unique_categories = list(queryset.values_list('category', flat=True).distinct())
         unique_categories = sorted(list(set([cat for cat in unique_categories if cat])))
 
         return Response({
@@ -228,6 +238,85 @@ class ProspectingCampaignLeadsAPIView(ProspectingLeadsAPIView):
             return Response({"error": "Campaign not found"}, status=status.HTTP_404_NOT_FOUND)
 
         request.campaign_id = str(pk)
+        return super().get(request)
+
+
+def _visible_discovery_runs():
+    workspace = get_default_workspace()
+    user = get_default_user()
+    return DiscoveryRun.objects.filter(
+        Q(campaign__workspace=workspace) |
+        Q(campaign__isnull=True, user_profile=user)
+    ).select_related(
+        'campaign', 'prospecting_request', 'specification_version'
+    ).prefetch_related('companies').distinct()
+
+
+class DiscoveryRunListAPIView(APIView):
+    """List search executions with campaign metadata and lead metrics."""
+
+    def get(self, request):
+        queryset = _visible_discovery_runs()
+        run_status = request.query_params.get('status')
+        search = request.query_params.get('search')
+        campaign_id = request.query_params.get('campaign_id')
+
+        if run_status and run_status.strip():
+            queryset = queryset.filter(status__iexact=run_status.strip())
+        if search and search.strip():
+            queryset = queryset.filter(
+                Q(keyword__icontains=search.strip()) |
+                Q(location__icontains=search.strip()) |
+                Q(campaign__name__icontains=search.strip())
+            )
+        if campaign_id and campaign_id.strip():
+            queryset = queryset.filter(campaign_id=campaign_id.strip())
+
+        try:
+            page = max(1, int(request.query_params.get('page', 1)))
+            page_size = min(100, max(1, int(request.query_params.get('page_size', 20))))
+        except ValueError:
+            page, page_size = 1, 20
+
+        queryset = queryset.order_by('-started_at')
+        total_count = queryset.count()
+        total_pages = max(1, (total_count + page_size - 1) // page_size)
+        start = (page - 1) * page_size
+        runs = queryset[start:start + page_size]
+
+        return Response({
+            'discovery_runs': DiscoveryRunSerializer(runs, many=True).data,
+            'total_count': total_count,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': total_pages,
+        }, status=status.HTTP_200_OK)
+
+
+class DiscoveryRunDetailAPIView(APIView):
+    """Retrieve one search execution with campaign and lead metrics."""
+
+    def get(self, request, pk):
+        try:
+            run = _visible_discovery_runs().get(id=pk)
+        except DiscoveryRun.DoesNotExist:
+            return Response(
+                {'error': 'Discovery run not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(DiscoveryRunSerializer(run).data, status=status.HTTP_200_OK)
+
+
+class DiscoveryRunLeadsAPIView(ProspectingLeadsAPIView):
+    """List leads found in one search execution."""
+
+    def get(self, request, pk):
+        if not _visible_discovery_runs().filter(id=pk).exists():
+            return Response(
+                {'error': 'Discovery run not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        request.run_id = str(pk)
         return super().get(request)
 
 

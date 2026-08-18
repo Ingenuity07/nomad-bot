@@ -152,6 +152,13 @@ class ProspectingIntentService:
             ).first()
 
             if existing_discovery:
+                from prospecting.campaigns import ensure_campaign_for_run
+                for existing_run in existing_discovery.runs.all():
+                    ensure_campaign_for_run(
+                        existing_run,
+                        user=confirmed_by,
+                        prospecting_request=request,
+                    )
                 logger.info(f"Discovery already exists for request {request_id} version {version}. Returning existing record.")
                 return existing_discovery
 
@@ -208,6 +215,22 @@ class ProspectingIntentService:
                 discovery=discovery,
                 prospecting_request=request,
                 specification_version=spec_version
+            )
+
+            from prospecting.campaigns import ensure_campaign_for_run
+            ensure_campaign_for_run(
+                run,
+                user=confirmed_by,
+                prospecting_request=request,
+                product_description=spec_obj.problem_hypothesis.solution_or_offering.value,
+                problem_statement=spec_obj.problem_hypothesis.problem.value,
+                geography={
+                    "countries": spec_obj.geography.countries.value,
+                    "regions": spec_obj.geography.regions.value,
+                    "cities": spec_obj.geography.cities.value,
+                    "radius": spec_obj.geography.radius.value,
+                    "scope": spec_obj.geography.scope.value,
+                },
             )
 
             # Dispatch async discovery runner on commit

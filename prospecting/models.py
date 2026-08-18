@@ -40,6 +40,13 @@ class ProspectingCampaign(models.Model):
     geography = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='DRAFT')
     created_by = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name='campaigns')
+    prospecting_request = models.OneToOneField(
+        'ProspectingRequest',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='campaign'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
