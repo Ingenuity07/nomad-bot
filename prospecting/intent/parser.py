@@ -36,7 +36,18 @@ class ProspectingIntentParser:
         prompt = f"Parse the following natural language campaign input into the requested JSON schema:\n\n{user_input_block}"
 
         # Firing LLM run
-        res = self.router.generate(prompt=prompt, system_prompt=INTENT_PARSER_SYSTEM_PROMPT)
+        res = self.router.generate(
+            prompt=prompt,
+            system_prompt=INTENT_PARSER_SYSTEM_PROMPT,
+            prompt_key="prospecting.intent_parser.user",
+            system_prompt_key="prospecting.intent_parser.system",
+            template_variables={
+                "objective": objective,
+                "target": target,
+                "qualification": qualification,
+                "clarification_history": clarification_history
+            }
+        )
         
         parsed_result = self._handle_llm_response(res, prompt)
         return parsed_result
@@ -86,7 +97,11 @@ class ProspectingIntentParser:
                     f"Your previous output failed validation with the following error: {str(e)}.\n"
                     "Please output a strictly valid JSON object conforming to the required schema definition."
                 )
-                retry_res = self.router.generate(prompt=correction_prompt, system_prompt=INTENT_PARSER_SYSTEM_PROMPT)
+                retry_res = self.router.generate(
+                    prompt=correction_prompt,
+                    system_prompt=INTENT_PARSER_SYSTEM_PROMPT,
+                    system_prompt_key="prospecting.intent_parser.system"
+                )
                 return self._handle_llm_response(retry_res, original_prompt, is_retry=True)
             
             return self._build_invalid_fallback_result(f"JSON validation failure: {str(e)}")

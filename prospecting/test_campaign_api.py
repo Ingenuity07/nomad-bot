@@ -19,6 +19,7 @@ from prospecting.intent.service import ProspectingIntentService
 
 
 class ProspectingCampaignAPITests(APITestCase):
+    databases = {'default', 'telemetry'}
     def setUp(self):
         self.user = UserProfile.objects.create(
             username="campaign_api_user",
@@ -117,6 +118,7 @@ class ProspectingCampaignAPITests(APITestCase):
 
 
 class CampaignPopulationTests(APITestCase):
+    databases = {'default', 'telemetry'}
     def setUp(self):
         self.user = UserProfile.objects.create(
             username="campaign_population_user",

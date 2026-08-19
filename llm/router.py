@@ -60,13 +60,37 @@ class IntelligentRouter(BaseLLMProvider):
             "critical": self._parse_fallback_env("ROUTER_FALLBACK_CRITICAL", default_critical)
         }
 
-    def _generate_with_logging(self, provider_key: str, adapter: Any, prompt: str, system_prompt: str, tools: list) -> Dict[str, Any]:
+    def _generate_with_logging(
+        self,
+        provider_key: str,
+        adapter: Any,
+        prompt: str,
+        system_prompt: str,
+        tools: list,
+        prompt_key: str = None,
+        prompt_version: int = None,
+        template_variables: dict = None,
+        prompt_obj: Any = None
+    ) -> Dict[str, Any]:
         import time
         import json
+        from django.utils import timezone
         from llm.models import PromptRun
-        
+        from llm.tracing import get_tracer
+        from llm.context import LLMRequestContext
+        from opentelemetry import trace
+
+        ctx = LLMRequestContext.get_current() or {}
+        correlation_id = ctx.get("correlation_id", "")
+        operation = ctx.get("operation", "")
+        user_id = ctx.get("user_id", "")
+        workspace_id = ctx.get("workspace_id", "")
+        context_metadata = ctx.get("metadata", {})
+
+        started_at = timezone.now()
         start_time = time.time()
         result = {"type": "error", "text": "Timeout or failed call"}
+        
         logger.info(
             "LLM_REQUEST provider=%s model=%s system_prompt=%r prompt=%r tools=%s",
             provider_key,
@@ -75,14 +99,72 @@ class IntelligentRouter(BaseLLMProvider):
             prompt,
             tools or [],
         )
-        
+
+        tracer = get_tracer()
+        span = None
+        trace_id = ""
+        span_id = ""
+        try:
+            span = tracer.start_span(operation or f"llm_generate.{provider_key}")
+            if span.is_recording():
+                span.set_attribute("llm.provider", provider_key)
+                span.set_attribute("llm.model", getattr(adapter, "model_name", provider_key))
+                span.set_attribute("llm.operation", operation or "llm_generate")
+                if prompt_key:
+                    span.set_attribute("llm.prompt_key", prompt_key)
+                    span.set_attribute("llm.prompt_version", prompt_version)
+                span.set_attribute("nomad.correlation_id", correlation_id)
+                for k, v in context_metadata.items():
+                    span.set_attribute(f"nomad.{k}", str(v))
+            span_ctx = span.get_span_context()
+            if span_ctx:
+                trace_id = format(span_ctx.trace_id, '032x')
+                span_id = format(span_ctx.span_id, '016x')
+        except Exception as o_err:
+            logger.warning(f"Error starting OTel span: {o_err}")
+
         # Retry transient upstream failures before moving to the next provider.
         retryable_statuses = {408, 429, 500, 502, 503, 504}
+        retry_count = 0
+        error_type = ""
+        error_code = ""
+        error_message = ""
+        provider_status_code = None
+
         for attempt in range(3):
-            result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
+            retry_count = attempt
+            try:
+                result = adapter.generate(prompt=prompt, system_prompt=system_prompt, tools=tools)
+            except Exception as ad_err:
+                result = {
+                    "type": "error",
+                    "text": f"Adapter exception: {str(ad_err)}",
+                    "status_code": 500
+                }
+            
             if result.get("type") == "error":
                 err_text = result.get("text", "")
                 status_code = result.get("status_code")
+                provider_status_code = status_code
+                error_message = err_text
+                
+                # Categorize error types
+                if status_code == 429 or "too many requests" in err_text.lower():
+                    error_type = "RATE_LIMIT"
+                    error_code = "429"
+                elif status_code == 408:
+                    error_type = "TIMEOUT"
+                    error_code = "408"
+                elif status_code in (401, 403):
+                    error_type = "AUTHENTICATION"
+                    error_code = str(status_code)
+                elif status_code and status_code >= 500:
+                    error_type = "PROVIDER_ERROR"
+                    error_code = str(status_code)
+                else:
+                    error_type = "UNKNOWN"
+                    error_code = "500"
+
                 is_transient = (
                     status_code in retryable_statuses
                     or "too many requests" in err_text.lower()
@@ -102,6 +184,7 @@ class IntelligentRouter(BaseLLMProvider):
                     continue
             break
 
+        completed_at = timezone.now()
         latency_ms = int((time.time() - start_time) * 1000)
         logger.info(
             "LLM_RESPONSE provider=%s model=%s latency_ms=%s response=%s",
@@ -111,38 +194,84 @@ class IntelligentRouter(BaseLLMProvider):
             json.dumps(result, default=str, ensure_ascii=False),
         )
         
-        if result.get("type") != "error":
-            input_tokens = result.get("prompt_tokens") or 0
-            output_tokens = result.get("completion_tokens") or 0
-            total_tokens = result.get("total_tokens") or (input_tokens + output_tokens)
-            model_name = getattr(adapter, "model_name", provider_key)
-            
-            # Expected price based on current market rates per 1M tokens
-            cost_usd = 0.0
-            m = model_name.lower()
-            if "gemini" in m:
-                cost_usd = (input_tokens / 1_000_000) * 0.075 + (output_tokens / 1_000_000) * 0.30
-            elif "mixtral" in m:
-                cost_usd = ((input_tokens + output_tokens) / 1_000_000) * 0.24
-            elif "llama3.1-8b" in m or "cerebras" in m:
-                cost_usd = ((input_tokens + output_tokens) / 1_000_000) * 0.10
-                
+        input_tokens = result.get("prompt_tokens") or 0
+        output_tokens = result.get("completion_tokens") or 0
+        total_tokens = result.get("total_tokens") or (input_tokens + output_tokens)
+        model_name = getattr(adapter, "model_name", provider_key)
+        
+        # Calculate cost
+        cost_usd = 0.0
+        input_cost = 0.0
+        output_cost = 0.0
+        m = model_name.lower()
+        if "gemini" in m:
+            input_cost = (input_tokens / 1_000_000) * 0.075
+            output_cost = (output_tokens / 1_000_000) * 0.30
+        elif "mixtral" in m:
+            input_cost = (input_tokens / 1_000_000) * 0.24
+            output_cost = (output_tokens / 1_000_000) * 0.24
+        elif "llama3.1-8b" in m or "cerebras" in m:
+            input_cost = (input_tokens / 1_000_000) * 0.10
+            output_cost = (output_tokens / 1_000_000) * 0.10
+        cost_usd = input_cost + output_cost
+
+        # Save to database (durable PromptRun record)
+        try:
+            response_text = result.get("text", "") if result.get("type") == "text" else json.dumps(result)
+            PromptRun.objects.using('telemetry').create(
+                purpose="prospecting_run",
+                prompt_text=prompt,
+                response_text=response_text,
+                model_name=model_name,
+                temperature=0.0,
+                tokens_used=total_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+                latency_ms=latency_ms,
+                # Observability fields
+                correlation_id=correlation_id,
+                trace_id=trace_id,
+                span_id=span_id,
+                operation=operation or "llm_generate",
+                prompt_version=prompt_version,
+                prompt_key=prompt_key or "",
+                template_variables=template_variables or {},
+                rendered_prompt=prompt,
+                provider=provider_key,
+                model=model_name,
+                input_cost=input_cost,
+                output_cost=output_cost,
+                total_cost=cost_usd,
+                duration_ms=latency_ms,
+                status="success" if result.get("type") != "error" else "error",
+                error_type=error_type,
+                error_code=error_code,
+                error_message=error_message,
+                provider_status_code=provider_status_code,
+                retry_count=retry_count,
+                metadata=context_metadata,
+                started_at=started_at,
+                completed_at=completed_at
+            )
+        except Exception as db_err:
+            logger.error(f"Failed to save PromptRun log: {db_err}")
+
+        # Finish OTel span
+        if span:
             try:
-                PromptRun.objects.create(
-                    purpose="prospecting_run",
-                    prompt_text=prompt,
-                    response_text=result.get("text", "") if result.get("type") == "text" else json.dumps(result),
-                    model_name=model_name,
-                    temperature=0.0,
-                    tokens_used=total_tokens,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost_usd,
-                    latency_ms=latency_ms
-                )
-            except Exception as db_err:
-                logger.error(f"Failed to save PromptRun log: {db_err}")
-                
+                if result.get("type") == "error":
+                    span.set_status(trace.StatusCode.ERROR, error_message)
+                    span.record_exception(Exception(error_message))
+                else:
+                    span.set_status(trace.StatusCode.OK)
+                    span.set_attribute("llm.input_tokens", input_tokens)
+                    span.set_attribute("llm.output_tokens", output_tokens)
+                    span.set_attribute("llm.total_tokens", total_tokens)
+                span.end()
+            except Exception as o_err:
+                logger.warning(f"Error ending OTel span: {o_err}")
+
         return result
 
     def set_active_conversation(self, conversation_id: str):
@@ -153,9 +282,43 @@ class IntelligentRouter(BaseLLMProvider):
         """Get the active conversation ID from thread-local storage."""
         return getattr(self._thread_local, "conversation_id", None)
 
-    def generate(self, prompt: str, system_prompt: str = "", tools: list = None) -> Dict[str, Any]:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        tools: list = None,
+        prompt_key: str = None,
+        system_prompt_key: str = None,
+        prompt_version: int = None,
+        system_prompt_version: int = None,
+        template_variables: dict = None
+    ) -> Dict[str, Any]:
         conversation_id = self.get_active_conversation()
         
+        prompt_obj = None
+        if prompt_key:
+            from llm.prompts import PromptRegistry
+            try:
+                rendered_data = PromptRegistry.render(prompt_key, variables=template_variables, version=prompt_version)
+                prompt = rendered_data["rendered_prompt"]
+                prompt_version = rendered_data["prompt_version"]
+                prompt_key = rendered_data["prompt_key"]
+                template_variables = rendered_data["variables"]
+                
+                # Fetch prompt_obj for metadata tracking
+                from llm.models import LLMPrompt
+                prompt_obj = LLMPrompt.objects.filter(key=prompt_key, version=prompt_version).first()
+            except Exception as e:
+                logger.warning(f"Failed to resolve prompt_key '{prompt_key}' from registry: {e}. Falling back to default.")
+
+        if system_prompt_key:
+            from llm.prompts import PromptRegistry
+            try:
+                rendered_sys = PromptRegistry.render(system_prompt_key, variables=template_variables, version=system_prompt_version)
+                system_prompt = rendered_sys["rendered_prompt"]
+            except Exception as e:
+                logger.warning(f"Failed to resolve system_prompt_key '{system_prompt_key}' from registry: {e}. Falling back to default.")
+
         # Try to resolve locked model/provider from DB
         conv = None
         if conversation_id:
@@ -174,7 +337,10 @@ class IntelligentRouter(BaseLLMProvider):
             if self.health_monitor.is_healthy(locked_provider):
                 adapter = self.adapters.get(locked_provider)
                 if adapter:
-                    result = self._generate_with_logging(locked_provider, adapter, prompt, system_prompt, tools)
+                    result = self._generate_with_logging(
+                        locked_provider, adapter, prompt, system_prompt, tools,
+                        prompt_key, prompt_version, template_variables, prompt_obj
+                    )
                     if result.get("type") != "error":
                         self.health_monitor.report_success(locked_provider)
                         result["provider"] = locked_provider
@@ -206,7 +372,10 @@ class IntelligentRouter(BaseLLMProvider):
                     continue
                 
                 logger.info(f"Attempting fallback to provider '{provider}' for conversation {conversation_id}")
-                result = self._generate_with_logging(provider, adapter, prompt, system_prompt, tools)
+                result = self._generate_with_logging(
+                    provider, adapter, prompt, system_prompt, tools,
+                    prompt_key, prompt_version, template_variables, prompt_obj
+                )
                 if result.get("type") != "error":
                     self.health_monitor.report_success(provider)
                     result["provider"] = provider
@@ -244,7 +413,10 @@ class IntelligentRouter(BaseLLMProvider):
                 continue
                 
             logger.info(f"Routing request to provider '{provider}'")
-            result = self._generate_with_logging(provider, adapter, prompt, system_prompt, tools)
+            result = self._generate_with_logging(
+                provider, adapter, prompt, system_prompt, tools,
+                prompt_key, prompt_version, template_variables, prompt_obj
+            )
             
             if result.get("type") != "error":
                 self.health_monitor.report_success(provider)

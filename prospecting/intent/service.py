@@ -37,12 +37,20 @@ class ProspectingIntentService:
 
         parser = ProspectingIntentParser()
         try:
-            parsed_result = parser.parse_intent(
-                objective=request.raw_objective or "",
-                target=request.raw_target or "",
-                qualification=request.raw_qualification or "",
-                clarification_history=request.clarification_history
-            )
+            from llm.context import LLMRequestContext
+            with LLMRequestContext(
+                correlation_id=f"prospecting_request:{request_id}",
+                operation="prospecting.intent_parser",
+                metadata={
+                    "prospecting_request_id": str(request_id),
+                }
+            ):
+                parsed_result = parser.parse_intent(
+                    objective=request.raw_objective or "",
+                    target=request.raw_target or "",
+                    qualification=request.raw_qualification or "",
+                    clarification_history=request.clarification_history
+                )
         except Exception as e:
             logger.exception(f"Intent parser failed for request {request_id}")
             request.status = 'FAILED'

@@ -85,6 +85,7 @@ class DummyCompanyProvider(CompanyDiscoveryProvider):
 # =====================================================================
 
 class ToolPlatformTestCase(TestCase):
+    databases = {'default', 'telemetry'}
     def setUp(self):
         self.registry = ToolRegistry()
         self.executor = ToolExecutor(self.registry)
@@ -214,6 +215,7 @@ class ToolPlatformTestCase(TestCase):
 
 
 class GeminiReliabilityTestCase(TestCase):
+    databases = {'default', 'telemetry'}
     @patch("llm.gemini_api.requests.post")
     def test_gemini_error_preserves_http_status_and_message(self, mock_post):
         response = MagicMock()
@@ -251,3 +253,224 @@ class GeminiReliabilityTestCase(TestCase):
         self.assertEqual(result["status_code"], 503)
         self.assertEqual(adapter.generate.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
+
+
+class PromptRegistryTestCase(TestCase):
+    databases = {'default', 'telemetry'}
+    def test_prompt_creation_and_active_uniqueness(self):
+        from llm.models import LLMPrompt
+        from django.core.exceptions import ValidationError
+
+        # Create version 1
+        p1 = LLMPrompt.objects.create(key="test.prompt", version=1, template="Hello {{ name }}!", is_active=True)
+        self.assertTrue(p1.is_active)
+
+        # Create version 2 (also active)
+        p2 = LLMPrompt.objects.create(key="test.prompt", version=2, template="Hi {{ name }}!", is_active=True)
+        self.assertTrue(p2.is_active)
+
+        # Refresh p1 and verify it is now inactive
+        p1.refresh_from_db()
+        self.assertFalse(p1.is_active)
+
+        # Check unique constraint on key + version
+        with self.assertRaises(Exception):
+            LLMPrompt.objects.create(key="test.prompt", version=2, template="Duplicate version")
+
+    def test_jinja2_compilation_and_rendering(self):
+        from llm.models import LLMPrompt
+        from llm.prompts import PromptRegistry
+        from django.core.exceptions import ValidationError
+
+        # Malformed template syntax -> should raise ValidationError on clean/save
+        with self.assertRaises(ValidationError):
+            LLMPrompt.objects.create(key="bad.template", template="Hello {{ name")
+
+        # Correct template rendering
+        p = LLMPrompt.objects.create(key="render.test", template="Hello {{ user.first_name }}!")
+        rendered = PromptRegistry.render("render.test", {"user": {"first_name": "Alice"}})
+        self.assertEqual(rendered["rendered_prompt"], "Hello Alice!")
+        self.assertEqual(rendered["prompt_version"], p.version)
+
+    def test_historical_used_prompt_immutability(self):
+        from llm.models import LLMPrompt, PromptRun
+        from django.core.exceptions import ValidationError
+
+        p = LLMPrompt.objects.create(key="immutable.test", template="Initial template")
+        
+        # Associate with a PromptRun
+        PromptRun.objects.using('telemetry').create(
+            purpose="test",
+            prompt_text="Initial template",
+            response_text="ok",
+            model_name="mock",
+            prompt_key=p.key,
+            prompt_version=p.version
+        )
+
+        # Attempt to change the template text
+        p.template = "Changed template"
+        with self.assertRaises(ValidationError):
+            p.save()
+
+
+class LLMObservabilityTestCase(TestCase):
+    databases = {'default', 'telemetry'}
+    def test_request_context_propagation_and_merging(self):
+        from llm.context import LLMRequestContext
+
+        with LLMRequestContext(correlation_id="root_id", operation="root_op", metadata={"k1": "v1"}):
+            self.assertEqual(LLMRequestContext.get_value("correlation_id"), "root_id")
+            self.assertEqual(LLMRequestContext.get_value("operation"), "root_op")
+            self.assertEqual(LLMRequestContext.get_value("metadata")["k1"], "v1")
+
+            # Nested context overrides field and merges metadata
+            with LLMRequestContext(operation="child_op", metadata={"k2": "v2"}):
+                self.assertEqual(LLMRequestContext.get_value("correlation_id"), "root_id")
+                self.assertEqual(LLMRequestContext.get_value("operation"), "child_op")
+                self.assertEqual(LLMRequestContext.get_value("metadata")["k1"], "v1")
+                self.assertEqual(LLMRequestContext.get_value("metadata")["k2"], "v2")
+
+            # Restores parent context
+            self.assertEqual(LLMRequestContext.get_value("operation"), "root_op")
+
+        self.assertIsNone(LLMRequestContext.get_current())
+
+    @patch("llm.tracing.get_tracer")
+    def test_router_instrumentation_saves_observability_fields(self, mock_get_tracer):
+        from llm.router import IntelligentRouter
+        from llm.models import PromptRun, LLMPrompt
+        from llm.context import LLMRequestContext
+        from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+
+        # Mock Tracer and Span context
+        trace_id_int = 0x1234567890abcdef1234567890abcdef
+        span_id_int = 0x1234567890abcdef
+        span_ctx = SpanContext(trace_id_int, span_id_int, is_remote=False, trace_flags=TraceFlags(1))
+        mock_span = NonRecordingSpan(span_ctx)
+        
+        mock_tracer = MagicMock()
+        mock_tracer.start_span.return_value = mock_span
+        mock_get_tracer.return_value = mock_tracer
+
+        # Prepare adapter mock
+        adapter = MagicMock()
+        adapter.model_name = "gemini-2.5-flash"
+        adapter.generate.return_value = {
+            "type": "text",
+            "text": "Success response",
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15
+        }
+
+        # Setup prompt registry template
+        prompt_obj = LLMPrompt.objects.create(key="observe.prompt", version=1, template="Greet {{ name }}", is_active=True)
+
+        router = IntelligentRouter.__new__(IntelligentRouter)
+        router.adapters = {"test": adapter}
+
+        # Run with context
+        with LLMRequestContext(correlation_id="corr_99", operation="test_op", metadata={"test_meta": "yes"}):
+            res = router._generate_with_logging(
+                provider_key="test",
+                adapter=adapter,
+                prompt="Greet Alice",
+                system_prompt="sys",
+                tools=[],
+                prompt_key="observe.prompt",
+                prompt_version=1,
+                template_variables={"name": "Alice"},
+                prompt_obj=prompt_obj
+            )
+
+        self.assertEqual(res["type"], "text")
+        
+        # Verify PromptRun DB record fields
+        run_record = PromptRun.objects.using('telemetry').filter(correlation_id="corr_99").first()
+        self.assertIsNotNone(run_record)
+        self.assertEqual(run_record.operation, "test_op")
+        self.assertEqual(run_record.prompt_key, "observe.prompt")
+        self.assertEqual(run_record.prompt_version, 1)
+        self.assertEqual(run_record.template_variables, {"name": "Alice"})
+        self.assertEqual(run_record.provider, "test")
+        self.assertEqual(run_record.model, "gemini-2.5-flash")
+        self.assertEqual(run_record.trace_id, format(trace_id_int, '032x'))
+        self.assertEqual(run_record.span_id, format(span_id_int, '016x'))
+        self.assertEqual(run_record.metadata, {"test_meta": "yes"})
+        self.assertEqual(run_record.status, "success")
+        self.assertGreater(run_record.total_cost, 0.0)
+
+
+class TelemetryDatabaseSeparationTestCase(TestCase):
+    databases = {'default', 'telemetry'}
+    def test_database_routing_separation(self):
+        from llm.models import LLMPrompt, PromptRun
+
+        # 1. LLMPrompt uses default database
+        p = LLMPrompt.objects.create(key="db.separation.test", template="Hello separation test!")
+        self.assertEqual(p._state.db, "default")
+
+        # Verify it can be retrieved from default database
+        p_retrieved = LLMPrompt.objects.using("default").filter(id=p.id).first()
+        self.assertIsNotNone(p_retrieved)
+
+        # 2. PromptRun uses telemetry database
+        pr = PromptRun.objects.create(
+            purpose="test",
+            prompt_text="Test prompt",
+            response_text="Test response",
+            model_name="test-model"
+        )
+        self.assertEqual(pr._state.db, "telemetry")
+
+        # Verify it is written to telemetry DB
+        pr_retrieved = PromptRun.objects.using("telemetry").filter(id=pr.id).first()
+        self.assertIsNotNone(pr_retrieved)
+
+        # Verify it cannot be queried on default DB (table does not exist)
+        from django.db import OperationalError
+        try:
+            PromptRun.objects.using("default").filter(id=pr.id).first()
+            self.fail("Querying PromptRun on default DB should fail because the table does not exist.")
+        except OperationalError:
+            # Expected! The table is not migrated to default DB.
+            pass
+
+    def test_prompt_registry_reads_from_default(self):
+        from llm.models import LLMPrompt
+        from llm.prompts import PromptRegistry
+
+        p = LLMPrompt.objects.create(key="registry.test.db", template="Test registry templating {{ var }}", is_active=True)
+        self.assertEqual(p._state.db, "default")
+
+        rendered = PromptRegistry.render("registry.test.db", {"var": "ok"})
+        self.assertEqual(rendered["rendered_prompt"], "Test registry templating ok")
+        self.assertEqual(rendered["prompt_version"], p.version)
+
+    def test_telemetry_failure_does_not_break_execution(self):
+        from llm.router import IntelligentRouter
+        from unittest.mock import patch
+        from django.db import OperationalError
+
+        # Make sure target prompt exists on default
+        from llm.models import LLMPrompt
+        LLMPrompt.objects.create(key="fail.test.prompt", version=1, template="Hi {{ name }}", is_active=True)
+
+        router = IntelligentRouter()
+        
+        with patch("llm.models.PromptRun.objects.using") as mock_using:
+            mock_using.side_effect = OperationalError("Simulated database disk failure")
+
+            # Running generate with observation context. Telemetry save will raise
+            # OperationalError, but router execution should complete successfully.
+            res = router.generate(
+                prompt="test telemetry failure",
+                prompt_key="fail.test.prompt",
+                prompt_version=1,
+                template_variables={"name": "Bob"}
+            )
+            # The router completed generation despite telemetry persistence failing
+            self.assertIsNotNone(res)
+
+

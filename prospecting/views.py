@@ -648,7 +648,33 @@ class LeadSalesGuidanceAPIView(APIView):
             full_prompt = f"{prompt}\n\nSchema:\n{schema}\n\nReturn ONLY raw JSON."
             
             import json
-            result = router.generate(prompt=full_prompt, system_prompt=system_prompt)
+            from llm.context import LLMRequestContext
+            with LLMRequestContext(
+                correlation_id=f"lead_guidance:{pk}",
+                operation="prospecting.lead_guidance",
+                metadata={
+                    "company_id": str(company.id),
+                    "company_name": company.name,
+                    "campaign_id": str(campaign.id),
+                    "person_id": str(person.id) if person else "",
+                }
+            ):
+                result = router.generate(
+                    prompt=full_prompt,
+                    system_prompt=system_prompt,
+                    prompt_key="prospecting.lead_guidance.user",
+                    system_prompt_key="prospecting.lead_guidance.system",
+                    template_variables={
+                        "company_name": company.name,
+                        "campaign_name": campaign.name,
+                        "product_description": campaign.product_description,
+                        "contact_name": person.name if person else 'Operations Manager',
+                        "contact_title": person.title if person else 'Ops Manager',
+                        "tone": tone,
+                        "objective": objective,
+                        "evidence": evidence_text
+                    }
+                )
             text = result.get("text", "").strip()
 
             if text.startswith("```json"):

@@ -38,7 +38,10 @@ class JobParser:
         
         result = self.provider.generate(
             prompt=prompt,
-            system_prompt=JOB_PARSE_SYSTEM_PROMPT
+            system_prompt=JOB_PARSE_SYSTEM_PROMPT,
+            prompt_key="kb.job_parser.user",
+            system_prompt_key="kb.job_parser.system",
+            template_variables={"job_text": raw_job_text[:15000]}
         )
         
         if result.get("type") == "error":

@@ -87,7 +87,7 @@ class GitHubToolsTestCase(TestCase):
         self.assertIn("http://github.com/file", result)
 
 
-class AgentLoopTestCase(TestCase):
+class AgentLoopTestCase(TransactionTestCase):
     
     def test_loop_state_stuck_detection(self):
         loop_state = LoopState()
@@ -318,7 +318,7 @@ class SchedulerTestCase(TestCase):
         self.assertFalse(disabled.enabled)
 
 
-class SecurityLockingAuditingVisionTestCase(TestCase):
+class SecurityLockingAuditingVisionTestCase(TransactionTestCase):
     
     def setUp(self):
         self.user = UserProfile.objects.create(username="default_user", email="default@test.com")
@@ -467,7 +467,7 @@ class DjangoCheckpointSaverTestCase(TestCase):
         self.assertEqual(tups[0].config["configurable"]["checkpoint_id"], "checkpoint-1")
 
 
-class V2AgentGraphTestCase(TestCase):
+class V2AgentGraphTestCase(TransactionTestCase):
     
     def setUp(self):
         self.user = UserProfile.objects.create(username="graph_user", email="graph@test.com")
@@ -532,7 +532,7 @@ class V2AgentGraphTestCase(TestCase):
         self.assertEqual(resumed_state["step_index"], 4)
 
 
-class ApproveAPITestCase(TestCase):
+class ApproveAPITestCase(TransactionTestCase):
     def setUp(self):
         from chat.models import Conversation
         self.user = UserProfile.objects.create(username="default_user", email="default@example.com")
@@ -706,7 +706,7 @@ class WebSocketStreamingTestCase(TransactionTestCase):
         await communicator.disconnect()
 
 
-class ReflectionAndCritiqueTestCase(TestCase):
+class ReflectionAndCritiqueTestCase(TransactionTestCase):
     def setUp(self):
         self.user = UserProfile.objects.create(username="critic_user", email="critic@example.com")
         from chat.models import Conversation
@@ -833,7 +833,7 @@ class ConversationAPIEndpointsTestCase(TestCase):
         self.assertEqual(conv_no_title.title, "This is a query about Python scraping tools")
 
 
-class IntelligentRouterTestCase(TestCase):
+class IntelligentRouterTestCase(TransactionTestCase):
     def setUp(self):
         from knowledge_base.models import UserProfile
         from llm.health import ProviderHealthMonitor
@@ -862,10 +862,12 @@ class IntelligentRouterTestCase(TestCase):
 
     def test_fallback_flow(self):
         from llm.router import IntelligentRouter
-        with patch('llm.router.GroqAdapter.generate') as mock_groq, \
+        with patch('llm.router.GeminiAdapter.generate') as mock_gemini, \
+             patch('llm.router.GroqAdapter.generate') as mock_groq, \
              patch('llm.router.OllamaAdapter.generate') as mock_ollama:
              
-            # Groq returns error, Ollama returns success
+            # Gemini and Groq return error, Ollama returns success
+            mock_gemini.return_value = {"type": "error", "text": "Gemini Rate Limited", "status_code": 429}
             mock_groq.return_value = {"type": "error", "text": "Groq Rate Limited", "status_code": 429}
             mock_ollama.return_value = {"type": "text", "text": "Hello from local Ollama"}
             
@@ -925,8 +927,16 @@ class IntelligentRouterTestCase(TestCase):
         self.assertIn("gemini-flash", provider_keys)
         self.assertIn("groq", provider_keys)
 
+    @patch('llm.router.GeminiAdapter.generate')
     @patch('llm.router.GroqAdapter.generate')
-    def test_manual_provider_selection_override(self, mock_groq_gen):
+    def test_manual_provider_selection_override(self, mock_groq_gen, mock_gemini_gen):
+        mock_gemini_gen.return_value = {
+            "type": "text",
+            "text": "Planner response",
+            "prompt_tokens": 10,
+            "completion_tokens": 10,
+            "total_tokens": 20
+        }
         mock_groq_gen.return_value = {
             "type": "text",
             "text": "Manual Groq response",

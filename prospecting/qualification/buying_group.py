@@ -57,7 +57,16 @@ class BuyingGroupWorkflow:
         system_prompt = "You are an expert lead enrichment agent. Return ONLY raw structured JSON matching the schema."
         full_prompt = f"{prompt}\n\nSchema:\n{schema}\n\nReturn ONLY raw JSON."
         
-        result = router.generate(prompt=full_prompt, system_prompt=system_prompt)
+        result = router.generate(
+            prompt=full_prompt,
+            system_prompt=system_prompt,
+            prompt_key="prospecting.buying_group.user",
+            system_prompt_key="prospecting.buying_group.system",
+            template_variables={
+                "scraped_text": scraped_text[:8000],
+                "product_description": campaign.product_description
+            }
+        )
         text = result.get("text", "").strip()
 
         # Clean markdown code block frames

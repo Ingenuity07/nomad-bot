@@ -105,7 +105,24 @@ def discover_campaign_async(run_id: str):
         cache.delete(lock_key)
         raise DiscoveryError(f"Discovery run {run_id} not found.")
 
+    ctx_manager = None
     try:
+        from llm.context import LLMRequestContext
+        
+        metadata = {
+            "discovery_run_id": str(run.id),
+            "discovery_id": str(run.discovery_id) if run.discovery_id else "",
+            "prospecting_request_id": str(run.prospecting_request_id) if run.prospecting_request_id else "",
+            "specification_version_id": str(run.specification_version_id) if run.specification_version_id else "",
+        }
+        
+        ctx_manager = LLMRequestContext(
+            correlation_id=f"discovery_run:{run.id}",
+            operation="prospecting.discovery_run",
+            metadata=metadata
+        )
+        ctx_manager.__enter__()
+
         # Keep every execution grouped even when a run was created by legacy
         # code or an internal caller that omitted a campaign explicitly.
         from prospecting.campaigns import ensure_campaign_for_run
@@ -191,7 +208,16 @@ def discover_campaign_async(run_id: str):
                         'Return only JSON: {"search_queries":["category one","category two"]}.'
                     )
                     logger.info("SEARCH_PLANNER_PROMPT prompt=%r", planner_prompt)
-                    res = router.generate(prompt=planner_prompt, system_prompt="You are a helpful search optimization planner. Respond in raw JSON.")
+                    res = router.generate(
+                        prompt=planner_prompt,
+                        system_prompt="You are a helpful search optimization planner. Respond in raw JSON.",
+                        prompt_key="prospecting.search_planner.user",
+                        system_prompt_key="prospecting.search_planner.system",
+                        template_variables={
+                            "target_description": spec.target.description.value,
+                            "objective": spec.objective.value
+                        }
+                    )
                     logger.info("SEARCH_PLANNER_RESPONSE response=%s", res)
                     if res.get("type") == "text":
                         parsed = json.loads(res.get("text", "{}"))
@@ -224,7 +250,15 @@ def discover_campaign_async(run_id: str):
                         'Return only JSON: {"keywords":["category one","category two"]}.'
                     )
                     logger.info("SEARCH_OPTIMIZER_PROMPT prompt=%r", prompt)
-                    res = router.generate(prompt, system_prompt="You are a helpful keyword extraction assistant. Respond in raw JSON.")
+                    res = router.generate(
+                        prompt=prompt,
+                        system_prompt="You are a helpful keyword extraction assistant. Respond in raw JSON.",
+                        prompt_key="prospecting.keyword_extractor.user",
+                        system_prompt_key="prospecting.keyword_extractor.system",
+                        template_variables={
+                            "search_keyword": search_keyword
+                        }
+                    )
                     logger.info("SEARCH_OPTIMIZER_RESPONSE response=%s", res)
                     if res.get("type") == "text":
                         parsed = json.loads(res.get("text", "{}"))
@@ -404,6 +438,11 @@ def discover_campaign_async(run_id: str):
         broadcast_progress(run_id, "failed", 100, f"Error: {str(e)}")
         raise e
     finally:
+        if ctx_manager:
+            try:
+                ctx_manager.__exit__(None, None, None)
+            except Exception:
+                pass
         cache.delete(lock_key)
         logger.info(f"Lock released for task: {lock_key}")
 

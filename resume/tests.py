@@ -10,6 +10,9 @@ from knowledge_base.jobs.ats_analyzer import ATSGapAnalyzer
 
 class NomadV3EngineTestCase(TestCase):
     def setUp(self):
+        from llm.health import ProviderHealthMonitor
+        ProviderHealthMonitor().health_status.clear()
+        
         self.client = APIClient()
         self.user, _ = UserProfile.objects.get_or_create(
             username='default_user',

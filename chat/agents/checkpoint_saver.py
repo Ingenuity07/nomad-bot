@@ -1,6 +1,10 @@
 from typing import Any, Iterator, Optional, Sequence, Tuple, Union, AsyncIterator
+import threading
 from asgiref.sync import sync_to_async
 from langchain_core.runnables import RunnableConfig
+
+_db_write_lock = threading.RLock()
+
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
     Checkpoint,
@@ -36,30 +40,31 @@ class DjangoCheckpointSaver(BaseCheckpointSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_id = checkpoint["id"]
-        parent_checkpoint_id = config["configurable"].get("checkpoint_id")
+        with _db_write_lock:
+            thread_id = config["configurable"]["thread_id"]
+            checkpoint_id = checkpoint["id"]
+            parent_checkpoint_id = config["configurable"].get("checkpoint_id")
 
-        checkpoint_data = _serialize(self.serde, checkpoint)
-        metadata_data = _serialize(self.serde, metadata)
+            checkpoint_data = _serialize(self.serde, checkpoint)
+            metadata_data = _serialize(self.serde, metadata)
 
-        from chat.models import AgentCheckpoint
-        AgentCheckpoint.objects.update_or_create(
-            thread_id=thread_id,
-            checkpoint_id=checkpoint_id,
-            defaults={
-                "parent_checkpoint_id": parent_checkpoint_id,
-                "checkpoint_data": checkpoint_data,
-                "metadata_data": metadata_data,
+            from chat.models import AgentCheckpoint
+            AgentCheckpoint.objects.update_or_create(
+                thread_id=thread_id,
+                checkpoint_id=checkpoint_id,
+                defaults={
+                    "parent_checkpoint_id": parent_checkpoint_id,
+                    "checkpoint_data": checkpoint_data,
+                    "metadata_data": metadata_data,
+                }
+            )
+
+            return {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_id": checkpoint_id,
+                }
             }
-        )
-
-        return {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_id": checkpoint_id,
-            }
-        }
 
     async def aput(
         self,
@@ -210,23 +215,24 @@ class DjangoCheckpointSaver(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_id = config["configurable"]["checkpoint_id"]
+        with _db_write_lock:
+            thread_id = config["configurable"]["thread_id"]
+            checkpoint_id = config["configurable"]["checkpoint_id"]
 
-        from chat.models import AgentCheckpointWrite
+            from chat.models import AgentCheckpointWrite
 
-        for idx, (channel, value) in enumerate(writes):
-            val_data = _serialize(self.serde, value)
-            AgentCheckpointWrite.objects.update_or_create(
-                thread_id=thread_id,
-                checkpoint_id=checkpoint_id,
-                task_id=task_id,
-                idx=idx,
-                defaults={
-                    "channel": channel,
-                    "value": val_data
-                }
-            )
+            for idx, (channel, value) in enumerate(writes):
+                val_data = _serialize(self.serde, value)
+                AgentCheckpointWrite.objects.update_or_create(
+                    thread_id=thread_id,
+                    checkpoint_id=checkpoint_id,
+                    task_id=task_id,
+                    idx=idx,
+                    defaults={
+                        "channel": channel,
+                        "value": val_data
+                    }
+                )
 
     async def aput_writes(
         self,

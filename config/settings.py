@@ -115,10 +115,34 @@ CHANNEL_LAYERS = {
 
 import sys
 if 'test' in sys.argv:
+    from django.test import TestCase, TransactionTestCase
+    TestCase.databases = {'default', 'telemetry'}
+    TransactionTestCase.databases = {'default', 'telemetry'}
+    
+    from django.db.backends.signals import connection_created
+    from django.dispatch import receiver
+    
+    @receiver(connection_created)
+    def set_sqlite_wal(sender, connection, **kwargs):
+        if connection.vendor == 'sqlite':
+            with connection.cursor() as cursor:
+                cursor.execute('PRAGMA journal_mode=WAL;')
+                cursor.execute('PRAGMA synchronous=NORMAL;')
+    
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': BASE_DIR / 'db.sqlite3',
+            'OPTIONS': {
+                'timeout': 30000,
+            }
+        },
+        'telemetry': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db_telemetry.sqlite3',
+            'OPTIONS': {
+                'timeout': 30000,
+            }
         }
     }
 else:
@@ -130,8 +154,14 @@ else:
             'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'password'),
             'HOST': os.environ.get('POSTGRES_HOST', '127.0.0.1'),
             'PORT': os.environ.get('POSTGRES_PORT', '5433'),
+        },
+        'telemetry': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': os.environ.get('LLM_TELEMETRY_DB_PATH', str(BASE_DIR / 'llm_telemetry.sqlite3')),
         }
     }
+
+DATABASE_ROUTERS = ['llm.routers.LLMTelemetryRouter']
 
 
 # Password validation
@@ -178,7 +208,7 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
-CELERY_TASK_ALWAYS_EAGER = os.environ.get("DEV", "False").lower() in ("true", "1", "yes")
+CELERY_TASK_ALWAYS_EAGER = 'test' in sys.argv
 CELERY_TASK_EAGER_PROPAGATES = CELERY_TASK_ALWAYS_EAGER
 
 

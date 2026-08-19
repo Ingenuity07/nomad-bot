@@ -73,7 +73,14 @@ class WebsiteAnalyzer:
 
         result = self.provider.generate(
             prompt=prompt,
-            system_prompt=QUALIFICATION_SYSTEM_PROMPT
+            system_prompt=QUALIFICATION_SYSTEM_PROMPT,
+            prompt_key="prospecting.web_qualifier.user",
+            system_prompt_key="prospecting.web_qualifier.system",
+            template_variables={
+                "company_name": company.name,
+                "category": company.category or "Business",
+                "scraped_content": text_content
+            }
         )
 
         # Handle LLM error responses

@@ -35,7 +35,13 @@ class ReplyClassifier:
         full_prompt = f"{prompt}\n\nSchema:\n{schema}\n\nReturn ONLY raw JSON."
         
         try:
-            result = router.generate(prompt=full_prompt, system_prompt=system_prompt)
+            result = router.generate(
+                prompt=full_prompt,
+                system_prompt=system_prompt,
+                prompt_key="prospecting.reply_classifier.user",
+                system_prompt_key="prospecting.reply_classifier.system",
+                template_variables={"reply_text": text}
+            )
             res_text = result.get("text", "").strip()
 
             # Clean markdown frames

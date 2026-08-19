@@ -122,7 +122,13 @@ class V3TailorAgent:
 
         result = self.provider.generate(
             prompt=prompt,
-            system_prompt=V3_TAILOR_SYSTEM_PROMPT
+            system_prompt=V3_TAILOR_SYSTEM_PROMPT,
+            prompt_key="resume.tailor_agent.user",
+            system_prompt_key="resume.tailor_agent.system",
+            template_variables={
+                "job_posting": json.dumps(job_context, indent=2),
+                "kb_context": json.dumps(kb_context, indent=2, default=str)
+            }
         )
 
         if result.get("type") == "error":
