@@ -25,6 +25,23 @@ Nomad-Bot is a modular, multi-tier agentic system designed to automate professio
     *   **Intelligent Scoring**: Assesses suitability (1-10) using LLM qualification prompts.
 5.  **Interactive Knowledge Base**: Dynamic forms for manually enriching skills, projects, and career history directly in the UI.
 
+### Discovery execution traces
+
+Every prospecting discovery writes two correlated files under `discovery_traces/`:
+
+- `<run-id>.html` — a self-contained, searchable five-stage flow viewer.
+- `<run-id>.json` — the raw machine-readable trace for automated quality checks.
+
+The viewer distinguishes LLM decisions from deterministic workflow decisions and
+shows input interpretation, exact tool queries and results, scraped website text,
+LLM qualification prompts/responses, timing, failures, and transparent quality
+checks. Open it through the run's `trace_url`, or directly at:
+
+```text
+GET /api/v3/prospecting/discovery-runs/<run-id>/trace/
+GET /api/v3/prospecting/discovery-runs/<run-id>/trace/?raw=true
+```
+
 ---
 
 ## 🚀 Getting Started

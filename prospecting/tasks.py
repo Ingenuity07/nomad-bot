@@ -12,6 +12,7 @@ from prospecting.discovery.providers.registry import discovery_provider_registry
 from prospecting.discovery.deduplication import Deduplicator
 from prospecting.contact import ContactExtractor
 from prospecting.analyzer import WebsiteAnalyzer
+from prospecting.discovery.tracing import DiscoveryTraceRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,15 @@ def discover_campaign_async(run_id: str):
         cache.delete(lock_key)
         raise DiscoveryError(f"Discovery run {run_id} not found.")
 
+    trace = DiscoveryTraceRecorder(run_id)
+    trace.initialize({
+        "keyword": run.keyword,
+        "location": run.location,
+        "campaign_id": str(run.campaign_id) if run.campaign_id else None,
+        "prospecting_request_id": str(run.prospecting_request_id) if run.prospecting_request_id else None,
+        "specification_version_id": str(run.specification_version_id) if run.specification_version_id else None,
+    })
+
     ctx_manager = None
     try:
         from llm.context import LLMRequestContext
@@ -175,6 +185,17 @@ def discover_campaign_async(run_id: str):
 
         active_providers = company_provider_names + web_provider_names
         logger.info(f"Active discovery providers: {active_providers}")
+        trace.event(
+            "llm_input_interpretation",
+            "Available source tools selected",
+            actor="workflow",
+            input_data={"candidate_providers": ["google_places", "apify", "openstreetmap", "duckduckgo"]},
+            output_data={
+                "company_search_providers": company_provider_names,
+                "web_search_providers": web_provider_names,
+            },
+            metadata={"decision_source": "provider health checks, not an LLM decision"},
+        )
         broadcast_progress(
             run_id,
             "discovering",
@@ -191,6 +212,18 @@ def discover_campaign_async(run_id: str):
                 cats = spec.target.categories.value
                 if cats:
                     search_keywords = [c for c in cats if c.strip()]
+                    trace.event(
+                        "llm_input_interpretation",
+                        "Confirmed specification interpreted as search categories",
+                        actor="workflow",
+                        input_data={
+                            "target_description": spec.target.description.value,
+                            "objective": spec.objective.value,
+                            "confirmed_categories": cats,
+                        },
+                        output_data={"search_queries": search_keywords},
+                        metadata={"decision_source": "confirmed structured specification; LLM planner skipped"},
+                    )
                 
                 if not search_keywords:
                     logger.info("Discovery Planner deriving search terms using router...")
@@ -222,12 +255,50 @@ def discover_campaign_async(run_id: str):
                     if res.get("type") == "text":
                         parsed = json.loads(res.get("text", "{}"))
                         search_keywords = parsed.get("search_queries", [])
+                    trace.event(
+                        "llm_input_interpretation",
+                        "LLM converted the user specification into search terms",
+                        actor="llm:search-planner",
+                        input_data={
+                            "system_prompt": "You are a helpful search optimization planner. Respond in raw JSON.",
+                            "prompt": planner_prompt,
+                        },
+                        output_data={"raw_response": res, "search_queries": search_keywords},
+                        status="success" if search_keywords else "error",
+                        metadata={"parsed": bool(search_keywords), "decision_source": "LLM"},
+                    )
             except Exception as planner_err:
                 logger.error(f"Discovery Planner failed: {planner_err}")
+                trace.event(
+                    "llm_input_interpretation",
+                    "Search planning failed",
+                    actor="llm:search-planner",
+                    input_data={"keyword": run.keyword, "location": run.location},
+                    output_data={"error": str(planner_err)},
+                    status="error",
+                    metadata={"parsed": False, "decision_source": "LLM"},
+                )
 
         # Fallback to run.keyword if no terms derived
         if not search_keywords:
             search_keywords = [run.keyword]
+            trace.event(
+                "llm_input_interpretation",
+                "Raw user keyword used as the fallback search plan",
+                actor="workflow",
+                input_data={"keyword": run.keyword, "location": run.location},
+                output_data={"search_queries": search_keywords},
+                metadata={"decision_source": "deterministic fallback; no LLM interpretation"},
+            )
+
+        trace.event(
+            "llm_input_interpretation",
+            "Resolved search plan",
+            actor="workflow",
+            input_data={"keyword": run.keyword, "location": run.location},
+            output_data={"resolved_search_terms": search_keywords},
+            metadata={"decision_source": "confirmed output passed to discovery tools"},
+        )
 
         # Execute company discovery using SearchCompaniesTool for each derived keyword
         from prospecting.discovery.dto import DiscoveryResultItem
@@ -260,13 +331,44 @@ def discover_campaign_async(run_id: str):
                         }
                     )
                     logger.info("SEARCH_OPTIMIZER_RESPONSE response=%s", res)
+                    original_search_keyword = search_keyword
+                    extracted = []
                     if res.get("type") == "text":
                         parsed = json.loads(res.get("text", "{}"))
                         extracted = parsed.get("keywords", [])
                         if extracted:
                             search_keyword = extracted[0]
+                    trace.event(
+                        "llm_input_interpretation",
+                        "LLM optimized a free-form keyword for search tools",
+                        actor="llm:keyword-optimizer",
+                        input_data={
+                            "system_prompt": "You are a helpful keyword extraction assistant. Respond in raw JSON.",
+                            "prompt": prompt,
+                        },
+                        output_data={
+                            "raw_response": res,
+                            "keywords": extracted,
+                            "selected_keyword": search_keyword,
+                        },
+                        status="success" if extracted else "error",
+                        metadata={
+                            "parsed": bool(extracted),
+                            "original_keyword": original_search_keyword,
+                            "decision_source": "LLM",
+                        },
+                    )
                 except Exception as llm_err:
                     logger.error(f"Failed to optimize search keyword using LLM: {llm_err}")
+                    trace.event(
+                        "llm_input_interpretation",
+                        "Keyword optimization failed",
+                        actor="llm:keyword-optimizer",
+                        input_data={"keyword": search_keyword},
+                        output_data={"error": str(llm_err)},
+                        status="error",
+                        metadata={"parsed": False, "decision_source": "LLM"},
+                    )
 
             for provider_name in company_provider_names:
                 logger.info(
@@ -395,7 +497,7 @@ def discover_campaign_async(run_id: str):
 
         # 3. Enrichment (Contacts & Suitability Analysis)
         total_to_enrich = len(leads_to_process)
-        analyzer = WebsiteAnalyzer()
+        analyzer = WebsiteAnalyzer(trace_recorder=trace)
 
         for idx, company in enumerate(leads_to_process):
             progress_pct = 40 + int((idx / max(total_to_enrich, 1)) * 50)
@@ -409,7 +511,7 @@ def discover_campaign_async(run_id: str):
             logger.info(msg)
             try:
                 # Extract contacts using ContactExtractor
-                ContactExtractor.extract_contacts(company)
+                ContactExtractor.extract_contacts(company, run_id=run_id)
                 # Analyze website using existing LLM analyzer
                 analyzer.analyze_website(company)
             except Exception as enrich_err:
@@ -422,6 +524,20 @@ def discover_campaign_async(run_id: str):
 
         broadcast_progress(run_id, "completed", 100, "Discovery and enrichment finished.")
         broadcast_completion(run_id, len(discovered_leads), new_count, duplicate_count)
+
+        trace.event(
+            "completion",
+            "Discovery completed",
+            actor="workflow",
+            input_data={"search_terms": search_keywords, "providers": active_providers},
+            output_data={
+                "leads_found": len(discovered_leads),
+                "new_leads": new_count,
+                "duplicates": duplicate_count,
+                "enriched_companies": total_to_enrich,
+            },
+            metadata={"decision_source": "workflow summary"},
+        )
 
         return {
             "status": "success",
@@ -436,6 +552,13 @@ def discover_campaign_async(run_id: str):
         run.status = 'failed'
         run.save()
         broadcast_progress(run_id, "failed", 100, f"Error: {str(e)}")
+        trace.event(
+            "error",
+            "Discovery failed",
+            actor="workflow",
+            output_data={"error": str(e), "exception_type": type(e).__name__},
+            status="error",
+        )
         raise e
     finally:
         if ctx_manager:

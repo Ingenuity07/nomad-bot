@@ -1,5 +1,6 @@
 import os
 import logging
+from django.http import FileResponse
 from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -25,6 +26,11 @@ from prospecting.discovery.engine import BusinessDiscoveryEngine
 from prospecting.contact import ContactExtractor
 from prospecting.analyzer import WebsiteAnalyzer
 from llm.router import IntelligentRouter
+from prospecting.discovery.tracing import (
+    DiscoveryTraceRecorder,
+    discovery_trace_paths,
+    load_discovery_trace,
+)
 
 logger = logging.getLogger(__name__)
 router = IntelligentRouter()
@@ -57,6 +63,13 @@ class ProspectingDiscoverAPIView(APIView):
             location=location,
             status='pending'
         )
+        trace_recorder = DiscoveryTraceRecorder(str(run.id))
+        trace_recorder.initialize({
+            "keyword": keyword,
+            "location": location,
+            "request_payload": dict(request.data),
+        })
+        trace_url = f"/api/v3/prospecting/discovery-runs/{run.id}/trace/"
         ensure_campaign_for_run(run, user=user)
 
         try:
@@ -67,6 +80,7 @@ class ProspectingDiscoverAPIView(APIView):
                 return Response({
                     "status": "success",
                     "run_id": str(run.id),
+                    "trace_url": trace_url,
                     "message": "Discovery run executed synchronously.",
                     "result": result
                 }, status=status.HTTP_200_OK)
@@ -76,12 +90,20 @@ class ProspectingDiscoverAPIView(APIView):
                 return Response({
                     "status": "success",
                     "run_id": str(run.id),
+                    "trace_url": trace_url,
                     "message": "Discovery run queued successfully."
                 }, status=status.HTTP_201_CREATED)
         except Exception as e:
             logger.exception("Failed to execute or dispatch prospecting task")
             run.status = 'failed'
             run.save()
+            trace_recorder.event(
+                "error",
+                "Discovery dispatch failed",
+                actor="api",
+                output_data={"error": str(e), "exception_type": type(e).__name__},
+                status="error",
+            )
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -305,6 +327,43 @@ class DiscoveryRunDetailAPIView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         return Response(DiscoveryRunSerializer(run).data, status=status.HTTP_200_OK)
+
+
+class DiscoveryRunTraceAPIView(APIView):
+    """Open the self-contained execution viewer or retrieve its raw JSON."""
+
+    def get(self, request, pk):
+        try:
+            run = _visible_discovery_runs().get(id=pk)
+        except DiscoveryRun.DoesNotExist:
+            return Response(
+                {'error': 'Discovery run not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        trace = load_discovery_trace(str(pk))
+        if trace is None:
+            DiscoveryTraceRecorder(str(pk)).initialize({
+                "keyword": run.keyword,
+                "location": run.location,
+                "legacy_trace": True,
+            })
+            trace = load_discovery_trace(str(pk))
+
+        if request.query_params.get("raw", "").lower() in ("1", "true", "yes"):
+            return Response(trace, status=status.HTTP_200_OK)
+
+        html_path = discovery_trace_paths(str(pk))["html"]
+        if not html_path.exists():
+            return Response(
+                {'error': 'Discovery trace viewer is not available'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return FileResponse(
+            html_path.open("rb"),
+            content_type="text/html; charset=utf-8",
+            filename=f"discovery-{pk}-trace.html",
+        )
 
 
 class DiscoveryRunLeadsAPIView(ProspectingLeadsAPIView):

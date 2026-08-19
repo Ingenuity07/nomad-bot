@@ -17,7 +17,8 @@ from .views import (
     ProspectingDiscoverStatusAPIView,
     ProspectingCampaignListAPIView, ProspectingCampaignDetailAPIView,
     ProspectingCampaignLeadsAPIView, DiscoveryRunListAPIView,
-    DiscoveryRunDetailAPIView, DiscoveryRunLeadsAPIView
+    DiscoveryRunDetailAPIView, DiscoveryRunLeadsAPIView,
+    DiscoveryRunTraceAPIView
 )
 
 urlpatterns = [
@@ -26,6 +27,7 @@ urlpatterns = [
     path('discovery-runs/', DiscoveryRunListAPIView.as_view(), name='discovery-runs-list'),
     path('discovery-runs/<uuid:pk>/', DiscoveryRunDetailAPIView.as_view(), name='discovery-run-detail'),
     path('discovery-runs/<uuid:pk>/leads/', DiscoveryRunLeadsAPIView.as_view(), name='discovery-run-leads'),
+    path('discovery-runs/<uuid:pk>/trace/', DiscoveryRunTraceAPIView.as_view(), name='discovery-run-trace'),
     path('intake/', ProspectingIntakeAPIView.as_view(), name='prospecting-intake-list-create'),
     path('intake/<uuid:pk>/', ProspectingIntakeDetailAPIView.as_view(), name='prospecting-intake-detail'),
     path('intake/<uuid:pk>/parse/', ProspectingIntakeParseAPIView.as_view(), name='prospecting-intake-parse'),

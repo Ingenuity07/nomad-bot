@@ -70,7 +70,7 @@ class ToolExecutor:
                         validated_args = validated_model.dict()
                 except ValidationError as val_err:
                     duration_ms = int((time.perf_counter() - start_time) * 1000)
-                    return ToolResult(
+                    result = ToolResult(
                         success=False,
                         data=None,
                         error=ToolError(
@@ -83,6 +83,8 @@ class ToolExecutor:
                         tool_name=tool_name,
                         duration_ms=duration_ms
                     )
+                    self._audit_execution(tool_name, arguments, result, context)
+                    return result
 
             logger.info(
                 "TOOL_REQUEST tool=%s run_id=%s arguments=%s",
@@ -199,3 +201,21 @@ class ToolExecutor:
                     )
             except Exception as db_err:
                 logger.error(f"Failed to record ToolExecution audit: {db_err}")
+
+        # Prospecting discovery runs use their run_id as a durable correlation
+        # key. Keep this independent of the chat AgentRun audit above.
+        discovery_run_id = getattr(context, "run_id", None) if context else None
+        if discovery_run_id:
+            try:
+                from prospecting.discovery.tracing import DiscoveryTraceRecorder
+                DiscoveryTraceRecorder(str(discovery_run_id)).record_tool_execution(
+                    tool_name,
+                    self._sanitize_data(arguments),
+                    result,
+                )
+            except Exception as trace_err:
+                logger.error(
+                    "Failed to record discovery tool trace for run %s: %s",
+                    discovery_run_id,
+                    trace_err,
+                )

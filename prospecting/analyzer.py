@@ -30,12 +30,23 @@ CRITICAL RULES:
 class WebsiteAnalyzer:
     """Uses LLM to analyze company websites for route-optimization suitability."""
 
-    def __init__(self, provider=None):
+    def __init__(self, provider=None, trace_recorder=None):
         self.provider = provider or IntelligentRouter()
+        self.trace = trace_recorder
 
     def analyze_website(self, company: LeadCompany) -> WebsiteAnalysis:
         if not company.website:
             logger.info(f"No website found for {company.name}. Creating generic low-score analysis.")
+            if self.trace:
+                self.trace.event(
+                    "llm_scrape_interpretation",
+                    f"No website analysis for {company.name}",
+                    actor="workflow",
+                    input_data={"company": company.name, "website": None},
+                    output_data={"lead_score": 3.0, "reason": "No website resolved."},
+                    status="error",
+                    metadata={"parsed": False, "decision_source": "fallback; LLM skipped"},
+                )
             analysis = WebsiteAnalysis.objects.create(
                 company=company,
                 description="No website resolved.",
@@ -46,10 +57,13 @@ class WebsiteAnalyzer:
 
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         text_content = ""
+        response_status = None
+        scrape_error = None
 
         try:
             logger.info(f"Fetching website text for analysis: {company.website}")
             res = requests.get(company.website, headers=headers, timeout=8)
+            response_status = res.status_code
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
                 # Remove script/style tags
@@ -59,10 +73,32 @@ class WebsiteAnalyzer:
                 text_content = " ".join(soup.get_text().split())[:8000]
         except Exception as e:
             logger.error(f"Failed to scrape homepage text for {company.name}: {e}")
+            scrape_error = str(e)
 
         # Fallback if page download yielded no text
+        scrape_source = "homepage"
         if not text_content.strip():
             text_content = f"Company Name: {company.name}. Category: {company.category or 'Business'}."
+            scrape_source = "fallback_company_record"
+
+        if self.trace:
+            self.trace.event(
+                "scraped_data",
+                f"Homepage content prepared for {company.name}",
+                actor="scraper:requests+beautifulsoup",
+                input_data={"url": company.website, "timeout_seconds": 8},
+                output_data={"cleaned_text": text_content},
+                status="success" if scrape_source == "homepage" else "error",
+                metadata={
+                    "company_id": str(company.id),
+                    "company_name": company.name,
+                    "source": scrape_source,
+                    "http_status": response_status,
+                    "page_count": 1 if scrape_source == "homepage" else 0,
+                    "character_count": len(text_content) if scrape_source == "homepage" else 0,
+                    "error": scrape_error,
+                },
+            )
 
         prompt = (
             f"Company Name: {company.name}\n"
@@ -86,6 +122,16 @@ class WebsiteAnalyzer:
         # Handle LLM error responses
         if result.get("type") == "error":
             logger.warning(f"LLM qualification failed: {result.get('text')}. Falling back.")
+            if self.trace:
+                self.trace.event(
+                    "llm_scrape_interpretation",
+                    f"LLM qualification failed for {company.name}",
+                    actor="llm:website-qualifier",
+                    input_data={"system_prompt": QUALIFICATION_SYSTEM_PROMPT, "prompt": prompt},
+                    output_data={"raw_response": result},
+                    status="error",
+                    metadata={"company_id": str(company.id), "parsed": False, "decision_source": "LLM"},
+                )
             analysis = WebsiteAnalysis.objects.create(
                 company=company,
                 description="Analysis request failed.",
@@ -103,6 +149,17 @@ class WebsiteAnalyzer:
                 raw_text = raw_text.split("```")[1].split("```")[0].strip()
             
             data = json.loads(raw_text)
+
+            if self.trace:
+                self.trace.event(
+                    "llm_scrape_interpretation",
+                    f"LLM interpreted scraped data for {company.name}",
+                    actor="llm:website-qualifier",
+                    input_data={"system_prompt": QUALIFICATION_SYSTEM_PROMPT, "prompt": prompt},
+                    output_data={"raw_response": result, "parsed_analysis": data},
+                    status="success",
+                    metadata={"company_id": str(company.id), "parsed": True, "decision_source": "LLM"},
+                )
             
             analysis = WebsiteAnalysis.objects.create(
                 company=company,
@@ -117,6 +174,16 @@ class WebsiteAnalyzer:
             return analysis
         except Exception as e:
             logger.error(f"Failed to parse qualification JSON from LLM: {e}. Raw: {raw_text}")
+            if self.trace:
+                self.trace.event(
+                    "llm_scrape_interpretation",
+                    f"Could not parse LLM analysis for {company.name}",
+                    actor="llm:website-qualifier",
+                    input_data={"system_prompt": QUALIFICATION_SYSTEM_PROMPT, "prompt": prompt},
+                    output_data={"raw_response": result, "parse_error": str(e)},
+                    status="error",
+                    metadata={"company_id": str(company.id), "parsed": False, "decision_source": "LLM"},
+                )
             analysis = WebsiteAnalysis.objects.create(
                 company=company,
                 description="Failed to parse LLM analysis payload.",

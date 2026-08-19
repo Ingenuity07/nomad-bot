@@ -58,3 +58,7 @@ model_waterfall_plan.txt
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
+
+# Generated per-discovery execution traces (folder structure stays in git).
+discovery_traces/*.json
+discovery_traces/*.html

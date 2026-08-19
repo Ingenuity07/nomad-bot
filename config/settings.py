@@ -200,6 +200,12 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Per-run discovery observability. Each run gets a JSON trace plus a
+# self-contained HTML viewer in this directory.
+DISCOVERY_TRACE_ENABLED = os.environ.get("DISCOVERY_TRACE_ENABLED", "True").lower() in ("true", "1", "yes")
+DISCOVERY_TRACE_DIR = Path(os.environ.get("DISCOVERY_TRACE_DIR", BASE_DIR / "discovery_traces"))
+DISCOVERY_TRACE_STRING_LIMIT = int(os.environ.get("DISCOVERY_TRACE_STRING_LIMIT", "100000"))
+
 # Celery Settings
 redis_host = os.environ.get("REDIS_HOST", "127.0.0.1")
 CELERY_BROKER_URL = f'redis://{redis_host}:6379/0'

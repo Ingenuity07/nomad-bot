@@ -15,6 +15,8 @@ class DiscoveryRunSerializer(serializers.ModelSerializer):
     campaign = serializers.SerializerMethodField()
     prospecting_request = serializers.SerializerMethodField()
     specification_version = serializers.SerializerMethodField()
+    trace_url = serializers.SerializerMethodField()
+    trace_available = serializers.SerializerMethodField()
 
     class Meta:
         model = DiscoveryRun
@@ -22,7 +24,7 @@ class DiscoveryRunSerializer(serializers.ModelSerializer):
             'id', 'keyword', 'location', 'status', 'total_leads_found',
             'lead_count', 'new_lead_count', 'duplicate_lead_count',
             'campaign', 'prospecting_request', 'specification_version',
-            'started_at', 'completed_at'
+            'started_at', 'completed_at', 'trace_url', 'trace_available'
         ]
         read_only_fields = fields
 
@@ -70,6 +72,13 @@ class DiscoveryRunSerializer(serializers.ModelSerializer):
             'version': specification.version,
             'status': specification.status,
         }
+
+    def get_trace_url(self, obj):
+        return f"/api/v3/prospecting/discovery-runs/{obj.id}/trace/"
+
+    def get_trace_available(self, obj):
+        from prospecting.discovery.tracing import discovery_trace_paths
+        return discovery_trace_paths(str(obj.id))["html"].exists()
 
 
 class ProspectingCampaignSerializer(serializers.ModelSerializer):

@@ -7,7 +7,7 @@ class ContactExtractor:
     """Crawls business sites to extract emails, phone numbers, and social links using the Tool Platform."""
 
     @staticmethod
-    def extract_contacts(company: LeadCompany) -> list:
+    def extract_contacts(company: LeadCompany, run_id: str = None) -> list:
         if not company.website:
             logger.info(f"No website resolved for company {company.name}. Skipping contact extraction.")
             return []
@@ -20,7 +20,10 @@ class ContactExtractor:
 
         orchestrator = SingleAgentOrchestrator()
         executor = ToolExecutor(orchestrator.tool_registry)
-        context = ToolContext(source="workflow")
+        correlated_run_id = run_id or (
+            str(company.discovery_run_id) if company.discovery_run_id else None
+        )
+        context = ToolContext(run_id=correlated_run_id, source="workflow")
 
         logger.info(f"Crawling website via CrawlWebsiteTool: {company.website}")
         crawl_res = executor.execute(
