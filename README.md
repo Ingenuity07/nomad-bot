@@ -310,7 +310,7 @@ graph TD
         end
     end
 
-    CALLER -->|generate(prompt, prompt_key)| ROUTER
+    CALLER -->|generate prompt + key| ROUTER
     ROUTER --> REGISTRY
     REGISTRY --> LLMPROMPT
     ROUTER --> SCORER
