@@ -16,9 +16,9 @@ class ContactExtractor:
         from llm.tools.registry import ToolRegistry
         from llm.tools.executor import ToolExecutor
         from llm.tools.context import ToolContext
-        from chat.orchestrator.single_agent import SingleAgentOrchestrator
+        from prospecting.orchestrator import ProspectingToolOrchestrator
 
-        orchestrator = SingleAgentOrchestrator()
+        orchestrator = ProspectingToolOrchestrator()
         executor = ToolExecutor(orchestrator.tool_registry)
         correlated_run_id = run_id or (
             str(company.discovery_run_id) if company.discovery_run_id else None

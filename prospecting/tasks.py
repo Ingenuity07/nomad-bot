@@ -177,9 +177,9 @@ def discover_campaign_async(run_id: str):
         import os
         from llm.tools.context import ToolContext
         from llm.tools.executor import ToolExecutor
-        from chat.orchestrator.single_agent import SingleAgentOrchestrator
+        from prospecting.orchestrator import ProspectingToolOrchestrator
 
-        orchestrator = SingleAgentOrchestrator()
+        orchestrator = ProspectingToolOrchestrator()
         executor = ToolExecutor(orchestrator.tool_registry)
         context = ToolContext(
             run_id=str(run.id),

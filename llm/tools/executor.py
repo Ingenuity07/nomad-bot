@@ -177,30 +177,8 @@ class ToolExecutor:
         return val
 
     def _audit_execution(self, tool_name: str, arguments: dict, result: ToolResult, context: Optional[ToolContext]) -> None:
-        agent_run_id = None
-        if context and context.metadata:
-            agent_run_id = context.metadata.get("agent_run_id")
-
-        if agent_run_id:
-            try:
-                from chat.models import AgentRun, ToolExecution
-                agent_run = AgentRun.objects.filter(id=agent_run_id).first()
-                if agent_run:
-                    status_choice = "success" if result.success else "error"
-                    output_val = result.data if result.success else (result.error.model_dump() if result.error else {})
-                    
-                    sanitized_input = self._sanitize_data(arguments)
-                    sanitized_output = self._sanitize_data(output_val)
-                    
-                    ToolExecution.objects.create(
-                        agent_run=agent_run,
-                        tool_name=tool_name,
-                        input_data=sanitized_input,
-                        output_data={"result": str(sanitized_output)[:10000]},
-                        status=status_choice
-                    )
-            except Exception as db_err:
-                logger.error(f"Failed to record ToolExecution audit: {db_err}")
+        # Chat agent run auditing removed in prospecting-only mode
+        pass
 
         # Prospecting discovery runs use their run_id as a durable correlation
         # key. Keep this independent of the chat AgentRun audit above.

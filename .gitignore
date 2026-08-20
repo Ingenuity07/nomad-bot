@@ -62,3 +62,6 @@ graft/
 # Generated per-discovery execution traces (folder structure stays in git).
 discovery_traces/*.json
 discovery_traces/*.html
+
+
+*celerybeat*

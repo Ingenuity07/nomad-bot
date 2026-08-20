@@ -67,9 +67,6 @@ INSTALLED_APPS = [
     'llm',
     'knowledge_base',
     'prospecting',
-    'resume',
-    'applications',
-    'chat',
 ]
 
 MIDDLEWARE = [

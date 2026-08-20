@@ -319,14 +319,8 @@ class IntelligentRouter(BaseLLMProvider):
             except Exception as e:
                 logger.warning(f"Failed to resolve system_prompt_key '{system_prompt_key}' from registry: {e}. Falling back to default.")
 
-        # Try to resolve locked model/provider from DB
+        # Try to resolve locked model/provider from DB (Conversation locking disabled in prospecting-only mode)
         conv = None
-        if conversation_id:
-            try:
-                from chat.models import Conversation
-                conv = Conversation.objects.filter(id=conversation_id).first()
-            except Exception as e:
-                logger.error(f"Error resolving conversation from DB: {e}")
 
         # Case 1: Model is already locked for this conversation
         if conv and conv.selected_provider and conv.selected_model:
