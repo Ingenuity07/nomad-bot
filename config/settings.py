@@ -31,6 +31,9 @@ def load_env_file():
 
 load_env_file()
 
+# Allow database operations in threads with running event loops
+os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/

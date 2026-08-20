@@ -3,6 +3,36 @@ from typing import List
 from celery import shared_task
 from django.core.cache import cache
 from asgiref.sync import async_to_sync
+import asyncio
+import threading
+
+def safe_async_to_sync(func, *args, **kwargs):
+    """
+    Safely execute a coroutine function in both synchronous contexts and
+    contexts where an asyncio event loop is already running in the current thread.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        result = []
+        error = []
+        def target():
+            try:
+                res = asyncio.run(func(*args, **kwargs))
+                result.append(res)
+            except Exception as e:
+                error.append(e)
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join()
+        if error:
+            raise error[0]
+        return result[0] if result else None
+    else:
+        return async_to_sync(func)(*args, **kwargs)
 from channels.layers import get_channel_layer
 from prospecting.exceptions import DiscoveryError
 from prospecting.models import DiscoveryRun, LeadCompany
@@ -42,7 +72,8 @@ def broadcast_progress(run_id: str, stage: str, progress: int, message: str):
 
     channel_layer = get_channel_layer()
     if channel_layer:
-        async_to_sync(channel_layer.group_send)(
+        safe_async_to_sync(
+            channel_layer.group_send,
             f"prospecting_{run_id}",
             {
                 "type": "progress_update",
@@ -65,7 +96,8 @@ def broadcast_completion(run_id: str, discovered: int, new_companies: int, dupli
 
     channel_layer = get_channel_layer()
     if channel_layer:
-        async_to_sync(channel_layer.group_send)(
+        safe_async_to_sync(
+            channel_layer.group_send,
             f"prospecting_{run_id}",
             {
                 "type": "progress_update",
