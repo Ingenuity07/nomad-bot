@@ -463,6 +463,8 @@ class LeadAPIExpansionsTestCase(TestCase):
         self.assertEqual(res.data[0]["role_type"], "DECISION_MAKER")
 
     def test_lead_intelligence_api(self):
+        self.company.category = "Web Search"
+        self.company.save(update_fields=["category"])
         url = reverse("lead-intelligence", kwargs={"pk": str(self.company.id)})
         res = self.client.get(url)
         self.assertEqual(res.status_code, status.HTTP_200_OK)
@@ -471,6 +473,47 @@ class LeadAPIExpansionsTestCase(TestCase):
         self.assertIn("explanation", res.data)
         self.assertIn("contacts", res.data)
         self.assertIn("buying_group", res.data)
+        self.assertIsNone(res.data["scores"]["overall"])
+        self.assertIsNone(res.data["scores"]["buying_window"])
+        self.assertIsNone(res.data["freshness"]["last_researched"])
+        self.assertEqual(res.data["contacts"][0]["name"], "Shivam Singh")
+        self.assertEqual(res.data["company"]["category"], "HVAC")
+        self.assertEqual(res.data["recommended_action"], "Research this account before outreach")
+
+    def test_lead_intelligence_derives_values_from_stored_research(self):
+        WebsiteAnalysis.objects.create(
+            company=self.company,
+            lead_score=8.4,
+            lead_score_reason="The site advertises emergency call-out scheduling",
+        )
+        Evidence.objects.create(
+            company=self.company,
+            campaign=self.campaign,
+            source_type="website",
+            source_url="https://leedshvacpros.co.uk/services",
+            source_title="Commercial maintenance services",
+            evidence_text="Offers 24/7 commercial HVAC maintenance contracts.",
+            confidence=0.9,
+        )
+        SalesGuidance.objects.create(
+            company=self.company,
+            campaign=self.campaign,
+            talking_points=["Reference the 24/7 maintenance service."],
+            recommended_angle="Service scheduling",
+            recommended_next_step="Ask how call-outs are currently scheduled",
+            message_draft="",
+        )
+
+        url = reverse("lead-intelligence", kwargs={"pk": str(self.company.id)})
+        res = self.client.get(url)
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["scores"]["overall"], 84.0)
+        self.assertEqual(res.data["scores"]["evidence_strength"], 65.0)
+        self.assertEqual(res.data["source_summary"]["verifiable_sources"], 1)
+        self.assertEqual(res.data["recommended_action"], "Ask how call-outs are currently scheduled")
+        self.assertEqual(res.data["talking_points"], ["Reference the 24/7 maintenance service."])
+        self.assertEqual(res.data["evidence_timeline"][0]["source_title"], "Commercial maintenance services")
 
 
 class BuyingGroupWorkflowTestCase(TestCase):

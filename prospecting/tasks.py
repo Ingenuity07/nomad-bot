@@ -412,6 +412,18 @@ def discover_campaign_async(run_id: str):
                         metadata={"parsed": False, "decision_source": "LLM"},
                     )
 
+            def useful_category(provider_category):
+                generic_categories = {
+                    "", "web search", "service", "point_of_interest", "establishment",
+                    "business", "company", "corporate_office",
+                }
+                raw_category = str(provider_category or "").strip()
+                if raw_category.lower() not in generic_categories:
+                    cleaned = raw_category.replace("_", " ")
+                else:
+                    cleaned = search_keyword.strip().replace("_", " ")
+                return (cleaned if cleaned.isupper() else cleaned.title())[:100] or None
+
             for provider_name in company_provider_names:
                 logger.info(
                     f"Running company search for: \"{search_keyword}\" in "
@@ -455,7 +467,7 @@ def discover_campaign_async(run_id: str):
                             website=website or None,
                             phone=c.get("phone"),
                             address=c.get("address"),
-                            category=c.get("category"),
+                            category=useful_category(c.get("category")),
                             external_id=c.get("external_id"),
                             raw_reference=metadata
                         )
@@ -499,10 +511,11 @@ def discover_campaign_async(run_id: str):
                             name=name,
                             website=website,
                             address=run.location or None,
-                            category="Web Search",
+                            category=useful_category(None),
                             external_id=website,
                             raw_reference={
                                 "source_provider": provider_name,
+                                "search_category": search_keyword,
                                 "title": item.get("title", ""),
                                 "snippet": item.get("snippet", "")
                             }

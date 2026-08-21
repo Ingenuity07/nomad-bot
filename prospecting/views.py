@@ -539,18 +539,65 @@ class LeadIntelligenceAPIView(APIView):
             latest_qual = company.qualifications.order_by('-analysis_version').first()
             analysis = getattr(company, 'analysis', None)
 
+            def normalise_score(value):
+                """Older website analyses use a 0-10 scale; qualifications use 0-100."""
+                if value is None:
+                    return None
+                score = float(value)
+                if score <= 10:
+                    score *= 10
+                return round(max(0.0, min(score, 100.0)), 1)
+
             # Build components
             company_data = LeadCompanySerializer(company).data
+            generic_categories = {
+                "", "web search", "service", "point_of_interest", "establishment",
+                "business", "company", "corporate_office",
+            }
+            category = str(company.category or "").strip()
+            if category.lower() in generic_categories:
+                run = company.discovery_run
+                specification = run.specification_version.specification_json if run and run.specification_version else {}
+                target = specification.get("target", {}) if isinstance(specification, dict) else {}
+                category_candidates = []
+                for field in ("industries", "categories"):
+                    field_value = target.get(field, {})
+                    values = field_value.get("value", []) if isinstance(field_value, dict) else field_value
+                    if isinstance(values, list):
+                        category_candidates.extend(str(value).strip() for value in values if str(value).strip())
+                if category_candidates:
+                    category = category_candidates[0]
+                elif run and len(run.keyword.split()) <= 6:
+                    category = run.keyword.strip().rstrip('.')
+                else:
+                    category = ""
+            cleaned_category = category.replace("_", " ")
+            company_data["category"] = (
+                cleaned_category if cleaned_category.isupper() else cleaned_category.title()
+            ) if cleaned_category else None
             
-            problem_hypothesis = ""
-            if company.campaign:
-                problem_hypothesis = company.campaign.problem_statement
-                
+            problem_hypothesis = (
+                company.campaign.problem_statement if company.campaign else ""
+            ) or (analysis.lead_score_reason if analysis else "") or ""
+
+            evidence_qs = company.evidence_records.select_related('signal').order_by('-captured_at')
+            signal_qs = company.signals.select_related('signal').order_by('-last_detected_at')
+            evidence_count = evidence_qs.count()
+            evidence_score = None
+            if evidence_count:
+                confidences = [float(item.confidence) for item in evidence_qs]
+                unique_sources = len({item.source_url for item in evidence_qs})
+                evidence_score = round(min(
+                    (sum(confidences) / evidence_count * 50) + min(unique_sources * 20, 50),
+                    100,
+                ), 1)
+
+            analysis_score = normalise_score(analysis.lead_score) if analysis else None
             scores = {
-                "problem_fit": float(latest_qual.problem_fit_score) if latest_qual else (float(analysis.lead_score) * 10 if analysis else 0.0),
-                "evidence_strength": float(latest_qual.evidence_strength_score) if latest_qual else 50.0,
-                "buying_window": float(latest_qual.buying_window_score) if latest_qual else 50.0,
-                "overall": float(latest_qual.overall_score) if latest_qual else (float(analysis.lead_score) * 10 if analysis else 0.0),
+                "problem_fit": round(float(latest_qual.problem_fit_score), 1) if latest_qual else analysis_score,
+                "evidence_strength": round(float(latest_qual.evidence_strength_score), 1) if latest_qual else evidence_score,
+                "buying_window": round(float(latest_qual.buying_window_score), 1) if latest_qual else None,
+                "overall": round(float(latest_qual.overall_score), 1) if latest_qual else analysis_score,
             }
 
             explanation = {
@@ -560,16 +607,41 @@ class LeadIntelligenceAPIView(APIView):
                 "unknowns": latest_qual.unknowns if latest_qual else []
             }
 
-            signals = CompanySignalSerializer(company.signals.all(), many=True).data
-            evidence = EvidenceSerializer(company.evidence_records.all(), many=True).data
+            signals = CompanySignalSerializer(signal_qs, many=True).data
+            evidence = EvidenceSerializer(evidence_qs, many=True).data
             contacts = PersonSerializer(company.people.all(), many=True).data
             buying_group = BuyingGroupMemberSerializer(company.buying_group_members.all(), many=True).data
-            
-            recommended_action = "HIGH_PRIORITY_OUTREACH" if scores["overall"] >= 75.0 else "ENRICH_AND_MONITOR"
-            
+
+            guidance_qs = company.guidance_records.order_by('-created_at')
+            if company.campaign:
+                guidance_qs = guidance_qs.filter(campaign=company.campaign)
+            guidance = guidance_qs.first()
+
+            overall_score = scores["overall"]
+            if guidance:
+                recommended_action = guidance.recommended_next_step
+            elif overall_score is None:
+                recommended_action = "Research this account before outreach"
+            elif overall_score >= 75:
+                recommended_action = "Contact a relevant decision maker"
+            elif overall_score >= 50:
+                recommended_action = "Verify the strongest signal"
+            else:
+                recommended_action = "Keep monitoring for a stronger signal"
+
+            latest_research = company.research_runs.filter(
+                status='COMPLETED', completed_at__isnull=False
+            ).order_by('-completed_at').first()
+            latest_evidence = evidence_qs.first()
+            last_researched = (
+                latest_research.completed_at if latest_research else
+                latest_evidence.captured_at if latest_evidence else
+                analysis.created_at if analysis else None
+            )
+            from django.utils import timezone
             freshness = {
-                "last_researched": company.created_at.isoformat(),
-                "is_fresh": True
+                "last_researched": last_researched.isoformat() if last_researched else None,
+                "is_fresh": bool(last_researched and (timezone.now() - last_researched).days <= 30)
             }
 
             return Response({
@@ -580,11 +652,13 @@ class LeadIntelligenceAPIView(APIView):
                 "signals": signals,
                 "evidence_timeline": evidence,
                 "source_summary": {
-                    "verifiable_sources": len(evidence)
+                    "verifiable_sources": len({item.source_url for item in evidence_qs}),
+                    "evidence_records": evidence_count,
                 },
                 "contacts": contacts,
                 "buying_group": buying_group,
                 "recommended_action": recommended_action,
+                "talking_points": guidance.talking_points if guidance else explanation["positive_factors"][:3],
                 "freshness": freshness
             }, status=status.HTTP_200_OK)
             
@@ -1021,7 +1095,9 @@ class LeadCRMSyncAPIView(APIView):
     def post(self, request, pk):
         try:
             company = LeadCompany.objects.get(id=pk)
-            owner_email = request.data.get("owner_email", "owner@nomad.ai")
+            owner_email = request.data.get("owner_email")
+            if not owner_email and company.campaign:
+                owner_email = company.campaign.created_by.email
 
             from prospecting.crm.crm_provider import MockCRMProvider
             provider = MockCRMProvider()
@@ -1036,7 +1112,8 @@ class LeadCRMSyncAPIView(APIView):
 
             # 3. Update stage and assign owner
             provider.update_stage(company, "Prospecting")
-            provider.assign_owner(company, owner_email)
+            if owner_email:
+                provider.assign_owner(company, owner_email)
 
             # Retrieve saved records
             records = CRMIntegrationRecord.objects.filter(
