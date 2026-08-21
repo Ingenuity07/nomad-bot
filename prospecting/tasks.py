@@ -190,7 +190,7 @@ def discover_campaign_async(run_id: str):
         # independently below, so one failure or empty response cannot prevent
         # the remaining sources from being queried.
         company_provider_names = []
-        for name in ["google_places", "apify", "openstreetmap"]:
+        for name in ["google_places", "apollo", "apify", "openstreetmap"]:
             try:
                 from llm.providers.registry import provider_registry
                 prov = provider_registry.get(name)
@@ -221,7 +221,7 @@ def discover_campaign_async(run_id: str):
             "llm_input_interpretation",
             "Available source tools selected",
             actor="workflow",
-            input_data={"candidate_providers": ["google_places", "apify", "openstreetmap", "duckduckgo"]},
+            input_data={"candidate_providers": ["google_places", "apollo", "apify", "openstreetmap", "duckduckgo"]},
             output_data={
                 "company_search_providers": company_provider_names,
                 "web_search_providers": web_provider_names,

@@ -10,6 +10,7 @@ class CompanyCandidate(BaseModel):
     region: Optional[str] = None
     country: Optional[str] = None
     phone: Optional[str] = None
+    category: Optional[str] = None
     source: str
     source_url: Optional[str] = None
     external_id: Optional[str] = None

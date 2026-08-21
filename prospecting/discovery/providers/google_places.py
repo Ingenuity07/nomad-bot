@@ -6,6 +6,7 @@ from typing import List
 from prospecting.exceptions import DiscoveryError
 from prospecting.discovery.dto import DiscoveryRequest, DiscoveryResult, DiscoveryResultItem
 from prospecting.discovery.providers.base import BusinessDiscoveryProvider
+from prospecting.discovery.providers.config import env_flag, env_value
 from prospecting.discovery.providers.registry import discovery_provider_registry
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,13 @@ class GooglePlacesProvider(BusinessDiscoveryProvider):
         return "google_places"
 
     def health_check(self) -> bool:
-        return bool(os.environ.get("GOOGLE_MAPS_API_KEY", "").strip())
+        try:
+            return env_flag("GOOGLE_PLACES_ENABLED") and bool(
+                env_value("GOOGLE_PLACES_API_KEY", "GOOGLE_MAPS_API_KEY")
+            )
+        except ValueError as error:
+            logger.warning("Google Places provider configuration is invalid: %s", error)
+            return False
 
     def capabilities(self) -> list:
         return ["text_search", "nearby_search", "field_masking"]
@@ -27,9 +34,16 @@ class GooglePlacesProvider(BusinessDiscoveryProvider):
 
     def search(self, request: DiscoveryRequest) -> DiscoveryResult:
         request.validate()
-        api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+        try:
+            enabled = env_flag("GOOGLE_PLACES_ENABLED")
+        except ValueError as error:
+            raise DiscoveryError(str(error)) from error
+        if not enabled:
+            raise DiscoveryError("Google Places provider is disabled by GOOGLE_PLACES_ENABLED.")
+
+        api_key = env_value("GOOGLE_PLACES_API_KEY", "GOOGLE_MAPS_API_KEY")
         if not api_key:
-            raise DiscoveryError("Google Maps API Key is not configured.")
+            raise DiscoveryError("Google Places API key is not configured.")
 
         url = "https://places.googleapis.com/v1/places:searchText"
         headers = {
@@ -63,7 +77,8 @@ class GooglePlacesProvider(BusinessDiscoveryProvider):
         for attempt in range(retries):
             try:
                 logger.info("PROVIDER_REQUEST provider=google_places query=%r payload=%s attempt=%s", query_str, payload, attempt + 1)
-                res = requests.post(url, json=payload, headers=headers, timeout=10)
+                timeout = int(os.environ.get("GOOGLE_PLACES_TIMEOUT_SECONDS", "10"))
+                res = requests.post(url, json=payload, headers=headers, timeout=timeout)
                 if res.status_code == 200:
                     response = res.json()
                     logger.info("PROVIDER_RAW_RESPONSE provider=google_places query=%r result_count=%s data=%s", query_str, len(response.get("places", [])), response)
@@ -73,7 +88,7 @@ class GooglePlacesProvider(BusinessDiscoveryProvider):
                     time.sleep(backoff)
                     backoff *= 2
                 else:
-                    raise DiscoveryError(f"Google Places API returned status {res.status_code}: {res.text}")
+                    raise DiscoveryError(f"Google Places API returned HTTP {res.status_code}.")
             except requests.RequestException as req_err:
                 if attempt == retries - 1:
                     raise DiscoveryError(f"Google Places API request failed: {req_err}")

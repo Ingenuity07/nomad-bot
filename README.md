@@ -454,7 +454,7 @@ graph TD
 
     subgraph Discovery["Phase 2: Lead Discovery (Celery)"]
         DISCOVER["POST /api/prospecting/discover/\nKick off DiscoveryRun"]
-        DPR["DiscoveryProviders:\nDuckDuckGo Search\nGoogle Places\nApify\nSocial (LinkedIn)"]
+        DPR["DiscoveryProviders:\nDuckDuckGo Search\nGoogle Places\nApollo\nApify\nSocial (LinkedIn)"]
         DEDUP["Deduplicator\n(URL + domain hash)"]
         NORM["Normalizer\n(clean company records)"]
     end
@@ -554,6 +554,7 @@ graph TD
         subgraph Providers["Discovery Providers (pluggable registry)"]
             DDG["SearchDiscoveryProvider\n(DuckDuckGo)"]
             GP["GooglePlacesProvider\n(Places API)"]
+            APOLLO["ApolloProvider\n(Organization Search)"]
             APIFY["ApifyProvider\n(web scraping)"]
             SOC["SocialProvider\n(LinkedIn)"]
         end
@@ -571,9 +572,10 @@ graph TD
     SPEC --> QUERY
     QUERY --> DDG
     QUERY --> GP
+    QUERY --> APOLLO
     QUERY --> APIFY
     QUERY --> SOC
-    DDG & GP & APIFY & SOC --> MERGE
+    DDG & GP & APOLLO & APIFY & SOC --> MERGE
     MERGE --> DEDUP2
     DEDUP2 --> NORM2
     NORM2 -->|creates LeadCompany records| DB["Supabase DB"]
@@ -842,6 +844,10 @@ sequenceDiagram
 | `GROQ_API_KEY` | Groq provider key | — |
 | `CEREBRAS_API_KEY` | Cerebras provider key | — |
 | `OPENROUTER_API_KEY` | OpenRouter key | — |
+| `GOOGLE_PLACES_ENABLED` | Enable or disable Google Places without removing its key | `true` |
+| `GOOGLE_PLACES_API_KEY` | Google Places API (New) key | — |
+| `APOLLO_ENABLED` | Enable or disable Apollo without removing its key | `true` |
+| `APOLLO_API_KEY` | Apollo API key with Organization Search access | — |
 | `GEMINI_MODEL` | Gemini model override | `gemini-2.5-flash` |
 | `GROQ_MODEL` | Groq model override | `mixtral-8x7b-32768` |
 | `CEREBRAS_MODEL` | Cerebras model override | `llama3.1-8b` |

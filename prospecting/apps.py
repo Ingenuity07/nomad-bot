@@ -11,21 +11,29 @@ class ProspectingConfig(AppConfig):
     # Global state tracker for discovery data-providers availability
     providers_status = {
         'google_places': {'available': False, 'reason': 'uninitialized'},
+        'apollo': {'available': False, 'reason': 'uninitialized'},
         'apify': {'available': False, 'reason': 'uninitialized'},
         'search': {'available': True, 'reason': 'active'}
     }
 
     def ready(self):
         # Import providers to trigger registration registry side-effects
-        from prospecting.discovery.providers import google_places, apify, search
+        from prospecting.discovery.providers import apify, apollo, google_places, search
+        from prospecting.discovery.providers.config import provider_status
 
-        # Validate Google Maps API Key
-        google_key = os.environ.get('GOOGLE_MAPS_API_KEY', '').strip()
-        if google_key:
-            self.providers_status['google_places'] = {'available': True, 'reason': 'active'}
-        else:
-            self.providers_status['google_places'] = {'available': False, 'reason': 'missing_credentials'}
-            logger.warning("GOOGLE_MAPS_API_KEY is not set. Google Places provider disabled.")
+        self.providers_status['google_places'] = provider_status(
+            'GOOGLE_PLACES_ENABLED', 'GOOGLE_PLACES_API_KEY', 'GOOGLE_MAPS_API_KEY'
+        )
+        self.providers_status['apollo'] = provider_status('APOLLO_ENABLED', 'APOLLO_API_KEY')
+
+        for provider_name in ('google_places', 'apollo'):
+            status = self.providers_status[provider_name]
+            if not status['available']:
+                logger.info(
+                    "%s provider unavailable: %s",
+                    provider_name,
+                    status['reason'],
+                )
 
         # Validate Apify Token
         apify_token = os.environ.get('APIFY_API_TOKEN', '').strip()

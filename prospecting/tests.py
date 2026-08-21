@@ -64,6 +64,7 @@ class DiscoveryDTOTestCase(TestCase):
 class ProviderRegistryTestCase(TestCase):
     def test_registered_providers(self):
         self.assertTrue(discovery_provider_registry.has("google_places"))
+        self.assertTrue(discovery_provider_registry.has("apollo"))
         self.assertTrue(discovery_provider_registry.has("apify"))
         self.assertTrue(discovery_provider_registry.has("search"))
 
