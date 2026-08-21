@@ -53,6 +53,9 @@ CORS_ALLOW_ALL_ORIGINS = True
 
 INSTALLED_APPS = [
     'daphne',
+    'unfold',
+    'unfold.contrib.filters',
+    'unfold.contrib.forms',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -81,6 +84,189 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = 'config.urls'
+
+# ── Django Unfold Admin UI Configuration ──────────────────────────────────────
+UNFOLD = {
+    "SITE_TITLE": "Nomad Bot",
+    "SITE_HEADER": "Nomad Bot Admin",
+    "SITE_SUBHEADER": "B2B Prospecting Engine",
+    "SITE_URL": "/",
+    "SITE_ICON": None,
+    "SITE_LOGO": None,
+    "SITE_SYMBOL": "radar",          # Material symbol used as favicon fallback
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "THEME": "dark",                 # 'dark' | 'light' | None (respects OS)
+    "COLORS": {
+        "font": {
+            "subtle-light": "107 114 128",
+            "subtle-dark": "156 163 175",
+            "default-light": "75 85 99",
+            "default-dark": "209 213 219",
+            "important-light": "17 24 39",
+            "important-dark": "243 244 246",
+        },
+        "primary": {
+            "50": "240 245 255",
+            "100": "219 234 254",
+            "200": "191 219 254",
+            "300": "147 197 253",
+            "400": "96 165 250",
+            "500": "59 130 246",
+            "600": "37 99 235",
+            "700": "29 78 216",
+            "800": "30 64 175",
+            "900": "30 58 138",
+            "950": "23 37 84",
+        },
+    },
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": "Prospecting",
+                "separator": True,
+                "collapsible": False,
+                "items": [
+                    {
+                        "title": "Intake Requests",
+                        "icon": "inbox",
+                        "link": "/admin/prospecting/prospectingrequest/",
+                    },
+                    {
+                        "title": "Spec Versions",
+                        "icon": "description",
+                        "link": "/admin/prospecting/prospectingspecificationversion/",
+                    },
+                    {
+                        "title": "Campaigns",
+                        "icon": "campaign",
+                        "link": "/admin/prospecting/prospectingcampaign/",
+                    },
+                    {
+                        "title": "Discovery Runs",
+                        "icon": "search",
+                        "link": "/admin/prospecting/discoveryrun/",
+                    },
+                    {
+                        "title": "Discoveries",
+                        "icon": "explore",
+                        "link": "/admin/prospecting/discovery/",
+                    },
+                    {
+                        "title": "Discovery Leads",
+                        "icon": "link",
+                        "link": "/admin/prospecting/discoverylead/",
+                    },
+                ],
+            },
+            {
+                "title": "Leads",
+                "separator": True,
+                "collapsible": False,
+                "items": [
+                    {
+                        "title": "Companies",
+                        "icon": "business",
+                        "link": "/admin/prospecting/leadcompany/",
+                    },
+                    {
+                        "title": "Contacts",
+                        "icon": "contacts",
+                        "link": "/admin/prospecting/leadcontact/",
+                    },
+                    {
+                        "title": "Qualifications",
+                        "icon": "verified",
+                        "link": "/admin/prospecting/qualification/",
+                    },
+                    {
+                        "title": "Evidence",
+                        "icon": "article",
+                        "link": "/admin/prospecting/evidence/",
+                    },
+                    {
+                        "title": "Company Signals",
+                        "icon": "sensors",
+                        "link": "/admin/prospecting/companysignal/",
+                    },
+                ],
+            },
+            {
+                "title": "Outreach",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Target Lists",
+                        "icon": "list",
+                        "link": "/admin/prospecting/targetlist/",
+                    },
+                    {
+                        "title": "Enrollments",
+                        "icon": "how_to_reg",
+                        "link": "/admin/prospecting/campaignenrollment/",
+                    },
+                    {
+                        "title": "Email Sequences",
+                        "icon": "mark_email_read",
+                        "link": "/admin/prospecting/emailsequence/",
+                    },
+                    {
+                        "title": "Email Messages",
+                        "icon": "mail",
+                        "link": "/admin/prospecting/emailmessage/",
+                    },
+                    {
+                        "title": "Inbound Replies",
+                        "icon": "reply",
+                        "link": "/admin/prospecting/inboundreply/",
+                    },
+                ],
+            },
+            {
+                "title": "LLM",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Prompt Runs",
+                        "icon": "analytics",
+                        "link": "/admin/llm/promptrun/",
+                    },
+                    {
+                        "title": "Prompts",
+                        "icon": "auto_awesome",
+                        "link": "/admin/llm/llmprompt/",
+                    },
+                    {
+                        "title": "Agent Configs",
+                        "icon": "smart_toy",
+                        "link": "/admin/llm/agentconfig/",
+                    },
+                ],
+            },
+            {
+                "title": "System",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Users",
+                        "icon": "person",
+                        "link": "/admin/auth/user/",
+                    },
+                    {
+                        "title": "User Profiles",
+                        "icon": "manage_accounts",
+                        "link": "/admin/knowledge_base/userprofile/",
+                    },
+                ],
+            },
+        ],
+    },
+}
 
 TEMPLATES = [
     {

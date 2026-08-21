@@ -1,11 +1,12 @@
 from django.contrib import admin
-from django.utils.safestring import mark_safe
+from unfold.admin import ModelAdmin
 from llm.models import LLMPrompt, PromptRun, AgentConfig
 
+
 @admin.register(LLMPrompt)
-class LLMPromptAdmin(admin.ModelAdmin):
+class LLMPromptAdmin(ModelAdmin):
     list_display = ('key', 'version', 'is_active', 'created_at')
-    list_filter = ('is_active', 'created_at')
+    list_filter = ('is_active',)
     search_fields = ('key', 'description')
     ordering = ('key', '-version')
 
@@ -17,34 +18,48 @@ class LLMPromptAdmin(admin.ModelAdmin):
 
 
 @admin.register(PromptRun)
-class PromptRunAdmin(admin.ModelAdmin):
+class PromptRunAdmin(ModelAdmin):
     list_display = (
         'created_at',
-        'correlation_id',
         'operation',
+        'prompt_key',
         'provider',
-        'model',
+        'llm_model',
         'status',
-        'tokens_used',
-        'cost_usd',
-        'latency_ms'
+        'input_tokens',
+        'output_tokens',
+        'total_cost',
+        'duration_ms',
     )
-    list_filter = ('provider', 'model', 'status', 'created_at')
+    list_filter = ('provider', 'status')
     search_fields = ('correlation_id', 'trace_id', 'operation', 'error_message', 'prompt_key')
     ordering = ('-created_at',)
+    show_full_result_count = True
 
-    # Make everything read-only to prevent editing history logs
+    # Route all queries to the SQLite telemetry DB
+    def get_queryset(self, request):
+        return super().get_queryset(request).using('telemetry')
+
+    # Telemetry is read-only — never allow add or edit, but DO allow view
     def has_add_permission(self, request):
         return False
 
     def has_change_permission(self, request, obj=None):
         return False
 
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return True
+
     def get_readonly_fields(self, request, obj=None):
         return [f.name for f in self.model._meta.fields]
 
-    def get_queryset(self, request):
-        return super().get_queryset(request).using('telemetry')
+    # Computed column to avoid name clash with Python builtin 'model'
+    @admin.display(description='LLM Model')
+    def llm_model(self, obj):
+        return obj.model
 
     fieldsets = (
         ('Identity', {
@@ -56,7 +71,7 @@ class PromptRunAdmin(admin.ModelAdmin):
                 'prompt_version',
                 'template_variables',
                 'prompt_text',
-                'rendered_prompt'
+                'rendered_prompt',
             )
         }),
         ('Model Output', {
@@ -76,7 +91,7 @@ class PromptRunAdmin(admin.ModelAdmin):
                 'input_cost',
                 'output_cost',
                 'total_cost',
-                'cost_usd'
+                'cost_usd',
             )
         }),
         ('Metadata', {
@@ -89,8 +104,7 @@ class PromptRunAdmin(admin.ModelAdmin):
 
 
 @admin.register(AgentConfig)
-class AgentConfigAdmin(admin.ModelAdmin):
+class AgentConfigAdmin(ModelAdmin):
     list_display = ('name', 'model_tier', 'temperature', 'created_at')
-    list_filter = ('model_tier', 'created_at')
+    list_filter = ('model_tier',)
     search_fields = ('name', 'system_prompt')
-

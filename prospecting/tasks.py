@@ -48,16 +48,21 @@ logger = logging.getLogger(__name__)
 
 
 def build_duckduckgo_queries(category: str, location: str) -> List[str]:
-    """Build concise, high-recall lead-generation queries in fallback order."""
+    """Build concise, high-recall lead-generation queries in fallback order.
+
+    Location is intentionally NOT wrapped in quotes — exact-phrase quoting of
+    'United Kingdom, London' style strings rarely matches real web page content
+    and causes DDG to return zero results.
+    """
     category = " ".join((category or "").split()).strip(' "')
     location = " ".join((location or "").split()).strip(' "')
     if not category:
         return []
-    location_suffix = f' "{location}"' if location else ""
+    location_suffix = f" {location}" if location else ""
     queries = [
-        f'"{category}"{location_suffix}',
-        f'{category} companies{location_suffix}',
-        f'{category} directory{location_suffix}',
+        f"{category}{location_suffix}",
+        f"{category} companies{location_suffix}",
+        f"{category} directory{location_suffix}",
     ]
     # Preserve order while removing duplicates caused by unusual empty inputs.
     return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
@@ -167,8 +172,13 @@ def discover_campaign_async(run_id: str):
 
         # Keep every execution grouped even when a run was created by legacy
         # code or an internal caller that omitted a campaign explicitly.
-        from prospecting.campaigns import ensure_campaign_for_run
-        ensure_campaign_for_run(run)
+        # Wrapped in try/except so a missing default workspace cannot strand
+        # the run in 'queued' state before status is set to 'running'.
+        try:
+            from prospecting.campaigns import ensure_campaign_for_run
+            ensure_campaign_for_run(run)
+        except Exception as campaign_err:
+            logger.warning(f"Could not ensure campaign for run {run_id}: {campaign_err}")
 
         run.status = 'running'
         run.save()
