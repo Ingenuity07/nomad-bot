@@ -40,7 +40,7 @@ def get_default_workspace():
 class DiscoveryDTOTestCase(TestCase):
     def test_duckduckgo_queries_are_short_and_have_fallbacks(self):
         queries = build_duckduckgo_queries("pest control", "Manchester, UK")
-        self.assertEqual(queries[0], '\"pest control\" \"Manchester, UK\"')
+        self.assertEqual(queries[0], 'pest control Manchester, UK')
         self.assertIn("companies", queries[1])
         self.assertIn("directory", queries[2])
 
@@ -199,6 +199,58 @@ class CeleryTaskTestCase(TestCase):
         called_tools = [call.args[0] for call in mock_execute.call_args_list]
         self.assertIn("search_companies", called_tools)
         self.assertIn("search_web", called_tools)
+
+
+from django.test import override_settings
+
+class DiscoveryLeadCappingTestCase(TestCase):
+    def setUp(self):
+        self.user = get_default_user()
+        self.run = DiscoveryRun.objects.create(
+            user_profile=self.user,
+            keyword="pest control",
+            location="Manchester"
+        )
+
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.WebsiteAnalyzer")
+    @patch("prospecting.tasks.ContactExtractor")
+    @patch("prospecting.tasks.broadcast_progress")
+    @patch("prospecting.tasks.broadcast_completion")
+    @override_settings(PROSPECTING_MAX_LEADS_PER_RUN=1)
+    def test_cap_leads_limit_enforced(
+        self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor,
+        mock_website_analyzer, mock_execute
+    ):
+        mock_execute.return_value = type("ToolResult", (object,), {
+            "success": True,
+            "data": {
+                "companies": [
+                    {
+                        "name": "Company One",
+                        "website": "https://company1.co.uk",
+                        "phone": "+441619999991",
+                        "address": "Manchester, UK",
+                        "category": "Pest Control",
+                        "external_id": "test-company-1",
+                        "raw_metadata": {}
+                    },
+                    {
+                        "name": "Company Two",
+                        "website": "https://company2.co.uk",
+                        "phone": "+441619999992",
+                        "address": "Manchester, UK",
+                        "category": "Pest Control",
+                        "external_id": "test-company-2",
+                        "raw_metadata": {}
+                    }
+                ]
+            }
+        })()
+
+        result = discover_campaign_async(str(self.run.id))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["leads_found"], 1)  # Capped at 1 lead
 
 
 class StrategyFormulationTestCase(TestCase):
