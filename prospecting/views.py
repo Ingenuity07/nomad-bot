@@ -353,6 +353,20 @@ class DiscoveryRunTraceAPIView(APIView):
         if request.query_params.get("raw", "").lower() in ("1", "true", "yes"):
             return Response(trace, status=status.HTTP_200_OK)
 
+        if request.query_params.get("download", "").lower() in ("md", "markdown", "flow"):
+            flow_path = discovery_trace_paths(str(pk))["flow"]
+            if not flow_path.exists():
+                return Response(
+                    {'error': 'Discovery flow file is not available'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            return FileResponse(
+                flow_path.open("rb"),
+                as_attachment=True,
+                content_type="text/markdown; charset=utf-8",
+                filename=f"discovery-{pk}-flow.md",
+            )
+
         html_path = discovery_trace_paths(str(pk))["html"]
         if not html_path.exists():
             return Response(

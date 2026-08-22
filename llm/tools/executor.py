@@ -86,7 +86,7 @@ class ToolExecutor:
                     self._audit_execution(tool_name, arguments, result, context)
                     return result
 
-            logger.info(
+            logger.debug(
                 "TOOL_REQUEST tool=%s run_id=%s arguments=%s",
                 tool_name,
                 getattr(context, "run_id", None) if context else None,
@@ -149,7 +149,7 @@ class ToolExecutor:
 
         # 6. Audit Logging to the Database
         output_val = result.data if result.success else (result.error.model_dump() if result.error else {})
-        logger.info(
+        logger.debug(
             "TOOL_RESPONSE tool=%s provider=%s success=%s duration_ms=%s data=%s",
             tool_name,
             result.provider,

@@ -1,8 +1,8 @@
 """Durable, per-run observability traces for prospecting discovery.
 
-Each discovery produces a machine-readable JSON trace and a self-contained HTML
-viewer. Trace failures are deliberately non-fatal: observability must never stop
-lead discovery.
+Each discovery produces a machine-readable JSON trace, a human-readable flow
+file, and a self-contained HTML viewer. Trace failures are deliberately
+non-fatal: observability must never stop lead discovery.
 """
 
 from __future__ import annotations
@@ -28,8 +28,9 @@ STAGES = {
     "user_input": "1. User input",
     "llm_input_interpretation": "2. LLM interprets input",
     "tool_search": "3. Tools search",
-    "scraped_data": "4. Scraped data",
-    "llm_scrape_interpretation": "5. LLM interprets scraped data",
+    "website_selection": "4. Eligible websites",
+    "scraped_data": "5. Scraped data",
+    "llm_scrape_interpretation": "6. LLM interprets scraped data",
     "completion": "Completion",
     "error": "Error",
 }
@@ -106,6 +107,10 @@ def _quality_report(trace: Dict[str, Any]) -> Dict[str, Any]:
     events = trace.get("events", [])
     search_events = [event for event in events if event.get("stage") == "tool_search"]
     scrape_events = [event for event in events if event.get("stage") == "scraped_data"]
+    selection_event = next(
+        (event for event in reversed(events) if event.get("stage") == "website_selection"),
+        None,
+    )
     analysis_events = [
         event for event in events
         if event.get("stage") == "llm_scrape_interpretation"
@@ -145,6 +150,9 @@ def _quality_report(trace: Dict[str, Any]) -> Dict[str, Any]:
     leads_found = 0
     if completion:
         leads_found = int((completion.get("output") or {}).get("leads_found", 0) or 0)
+    selection_output = (selection_event or {}).get("output") or {}
+    eligible_websites = int(selection_output.get("eligible_count", 0) or 0)
+    selected_websites = int(selection_output.get("selected_count", 0) or 0)
 
     resolved_terms = []
     for event in plan_events:
@@ -199,6 +207,8 @@ def _quality_report(trace: Dict[str, Any]) -> Dict[str, Any]:
             "successful_search_calls": len(successful_searches),
             "providers": providers,
             "raw_results": search_results,
+            "eligible_websites": eligible_websites,
+            "selected_websites": selected_websites,
             "scraped_pages": scraped_pages,
             "scraped_characters": scraped_chars,
             "parsed_llm_analyses": parsed_analyses,
@@ -216,6 +226,7 @@ class DiscoveryTraceRecorder:
         self.directory = _trace_dir()
         self.json_path = self.directory / f"{self.run_id}.json"
         self.html_path = self.directory / f"{self.run_id}.html"
+        self.flow_path = self.directory / f"{self.run_id}-flow.md"
 
     def initialize(self, input_data: Optional[Dict[str, Any]] = None) -> None:
         if not _enabled():
@@ -347,6 +358,7 @@ class DiscoveryTraceRecorder:
         trace["updated_at"] = _utc_now()
         trace["quality"] = _quality_report(trace)
         self._atomic_write(self.json_path, json.dumps(trace, indent=2, ensure_ascii=False))
+        self._atomic_write(self.flow_path, _render_flow_file(trace))
         self._atomic_write(self.html_path, _render_html(trace))
 
     @staticmethod
@@ -367,7 +379,97 @@ def load_discovery_trace(run_id: str) -> Optional[Dict[str, Any]]:
 
 def discovery_trace_paths(run_id: str) -> Dict[str, Path]:
     recorder = DiscoveryTraceRecorder(str(run_id))
-    return {"json": recorder.json_path, "html": recorder.html_path}
+    return {
+        "json": recorder.json_path,
+        "html": recorder.html_path,
+        "flow": recorder.flow_path,
+    }
+
+
+def _render_flow_file(trace: Dict[str, Any]) -> str:
+    """Render a continuously updated, human-readable discovery audit file."""
+    events = trace.get("events", [])
+    quality = trace.get("quality", {})
+    metrics = quality.get("metrics", {})
+    selection = next(
+        (event for event in reversed(events) if event.get("stage") == "website_selection"),
+        {},
+    )
+    selection_output = selection.get("output") or {}
+    websites = selection_output.get("websites") or []
+
+    def json_block(value: Any) -> str:
+        if value is None:
+            return "_No data recorded._"
+        return f"```json\n{json.dumps(value, indent=2, ensure_ascii=False)}\n```"
+
+    def table_text(value: Any) -> str:
+        return str(value or "—").replace("|", "\\|").replace("\n", " ")
+
+    lines = [
+        f"# Discovery data flow — {trace.get('run_id', '')}",
+        "",
+        f"- **Status:** {trace.get('status', 'pending')}",
+        f"- **Created:** {trace.get('created_at', '—')}",
+        f"- **Last updated:** {trace.get('updated_at', '—')}",
+        "- **Scrape rule:** Every eligible website is listed; no more than 5 unique websites are scraped.",
+        "",
+        "## Discovery request",
+        "",
+        json_block(trace.get("input", {})),
+        "",
+        "## Flow summary",
+        "",
+        f"1. **Input interpreted** — {sum(1 for event in events if event.get('stage') == 'llm_input_interpretation')} planning event(s)",
+        f"2. **Data fetched** — {metrics.get('raw_results', 0)} raw result(s)",
+        f"3. **Websites evaluated** — {metrics.get('eligible_websites', 0)} eligible; {metrics.get('selected_websites', 0)} selected",
+        f"4. **Data scraped** — {metrics.get('scraped_pages', 0)} page(s), {metrics.get('scraped_characters', 0)} character(s)",
+        f"5. **LLM findings** — {metrics.get('parsed_llm_analyses', 0)} structured analysis result(s)",
+        f"6. **Discoveries** — {metrics.get('leads_found', 0)} lead(s) found",
+        "",
+        "## All eligible websites",
+        "",
+    ]
+
+    if websites:
+        lines.extend([
+            "| # | Company | Website | Scrape decision |",
+            "|---:|---|---|---|",
+        ])
+        for index, website in enumerate(websites, start=1):
+            decision = "Selected for scraping" if website.get("selected") else "Not scraped — five-website limit"
+            lines.append(
+                f"| {index} | {table_text(website.get('company_name'))} | "
+                f"{table_text(website.get('url'))} | {decision} |"
+            )
+    else:
+        lines.append("_Website candidates have not been recorded yet._")
+
+    lines.extend(["", "## Step-by-step execution", ""])
+    for index, event in enumerate(events, start=1):
+        lines.extend([
+            f"### Step {index}: {event.get('title', 'Untitled event')}",
+            "",
+            f"- **Time:** {event.get('timestamp', '—')}",
+            f"- **Stage:** {event.get('stage_label') or event.get('stage', '—')}",
+            f"- **Actor:** {event.get('actor', '—')}",
+            f"- **Result:** {event.get('status', '—')}",
+        ])
+        if event.get("duration_ms") is not None:
+            lines.append(f"- **Duration:** {event.get('duration_ms')} ms")
+        lines.extend([
+            "",
+            "#### Data received / request",
+            "",
+            json_block(event.get("input")),
+            "",
+            "#### Data produced / findings",
+            "",
+            json_block(event.get("output")),
+            "",
+        ])
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _render_html(trace: Dict[str, Any]) -> str:
@@ -392,7 +494,7 @@ main { max-width:1440px; margin:auto; padding:24px; } h1,h2,h3,p { margin-top:0;
 .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr)); gap:10px; margin-top:18px; }
 .metric,.quality-item { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; } .metric b { display:block; font-size:22px; }
 .quality { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; } .quality-item { display:grid; grid-template-columns:12px 1fr; gap:9px; } .dot { width:10px; height:10px; border-radius:50%; margin-top:5px; background:var(--muted); } .pass .dot { background:var(--good); } .warn .dot { background:var(--warn); } .fail .dot { background:var(--bad); }
-.flow { display:grid; grid-template-columns:repeat(5,1fr); gap:20px; align-items:stretch; } .flow-node { position:relative; min-width:0; background:var(--panel); border:1px solid var(--line); border-top:4px solid var(--brand); border-radius:10px; padding:14px; text-align:left; cursor:pointer; color:var(--text); } .flow-node:not(:last-child)::after { content:"→"; position:absolute; right:-17px; top:50%; color:var(--muted); font-size:18px; } .flow-node strong { display:block; margin-bottom:5px; } .flow-node span { color:var(--muted); }
+.flow { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:16px; align-items:stretch; } .flow-node { position:relative; min-width:0; background:var(--panel); border:1px solid var(--line); border-top:4px solid var(--brand); border-radius:10px; padding:14px; text-align:left; cursor:pointer; color:var(--text); } .flow-node:not(:last-child)::after { content:"→"; position:absolute; right:-15px; top:50%; color:var(--muted); font-size:18px; } .flow-node strong { display:block; margin-bottom:5px; } .flow-node span { color:var(--muted); }
 .controls { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; } .controls input,.controls select { border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:8px; padding:9px 11px; } .controls input { flex:1; min-width:220px; }
 .events { display:grid; gap:10px; } .event { display:grid; grid-template-columns:72px 14px minmax(0,1fr); gap:10px; } .event-time { color:var(--muted); font-size:12px; padding-top:14px; text-align:right; } .rail { position:relative; } .rail::before { content:""; position:absolute; left:6px; top:0; bottom:-11px; width:2px; background:var(--line); } .rail::after { content:""; position:absolute; left:2px; top:18px; width:10px; height:10px; border-radius:50%; background:var(--brand); }
 .event-card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:13px 15px; min-width:0; } .event-head { display:flex; gap:10px; justify-content:space-between; flex-wrap:wrap; } .event-title { font-weight:650; } .tag { color:var(--brand); font-size:12px; } .event.error .event-card { border-color:var(--bad); }
@@ -406,7 +508,7 @@ details { margin-top:9px; border-top:1px solid var(--line); padding-top:8px; } s
   <div class="top"><div><h1>Discovery execution trace</h1><div id="subtitle" class="muted"></div></div><div id="status" class="status"></div></div>
   <div id="metrics" class="metrics"></div>
   <h2>Quality checks</h2><div id="quality" class="quality"></div>
-  <h2>Flow map</h2><div id="flow" class="flow" aria-label="Five-stage discovery flow"></div>
+  <h2>Flow map</h2><div id="flow" class="flow" aria-label="Discovery data flow"></div>
   <h2>Event inspector</h2>
   <div class="controls"><label class="sr" for="search">Search events</label><input id="search" type="search" placeholder="Search prompts, queries, providers, or scraped text"><label class="sr" for="stage">Filter stage</label><select id="stage"><option value="">All stages</option></select></div>
   <div id="events" class="events"></div>
@@ -417,7 +519,7 @@ details { margin-top:9px; border-top:1px solid var(--line); padding-top:8px; } s
   const trace = JSON.parse(document.getElementById('trace-data').textContent);
   const $ = id => document.getElementById(id);
   const stages = [
-    ['user_input','User input'],['llm_input_interpretation','LLM plan'],['tool_search','Tools search'],['scraped_data','Scraped data'],['llm_scrape_interpretation','LLM analysis']
+    ['user_input','User input'],['llm_input_interpretation','LLM plan'],['tool_search','Fetched data'],['website_selection','Eligible websites'],['scraped_data','Scraped data'],['llm_scrape_interpretation','LLM findings'],['completion','Discoveries']
   ];
   const pretty = value => JSON.stringify(value, null, 2);
   const eventsFor = stage => trace.events.filter(event => event.stage === stage);

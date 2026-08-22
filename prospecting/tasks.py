@@ -5,6 +5,9 @@ from django.core.cache import cache
 from asgiref.sync import async_to_sync
 import asyncio
 import threading
+from urllib.parse import urlsplit
+
+from django.conf import settings
 
 def safe_async_to_sync(func, *args, **kwargs):
     """
@@ -45,6 +48,50 @@ from prospecting.analyzer import WebsiteAnalyzer
 from prospecting.discovery.tracing import DiscoveryTraceRecorder
 
 logger = logging.getLogger(__name__)
+
+MAX_WEBSITES_PER_DISCOVERY = 5
+
+
+def build_website_scrape_plan(companies, requested_limit: int = MAX_WEBSITES_PER_DISCOVERY):
+    """Return every unique eligible website and the bounded enrichment queue.
+
+    Search results remain visible even when they are outside the scrape budget.
+    The absolute cap deliberately cannot be raised above five by configuration or
+    a caller, which keeps each discovery run's external crawling predictable.
+    """
+    try:
+        limit = int(requested_limit)
+    except (TypeError, ValueError):
+        limit = MAX_WEBSITES_PER_DISCOVERY
+    limit = min(max(limit, 0), MAX_WEBSITES_PER_DISCOVERY)
+
+    websites = []
+    selected_companies = []
+    seen_domains = set()
+
+    for company in companies:
+        website = str(company.website or "").strip()
+        if not website:
+            continue
+        normalized_url = website if website.startswith(("http://", "https://")) else f"https://{website}"
+        domain = (urlsplit(normalized_url).hostname or website).lower().removeprefix("www.")
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+
+        selected = len(selected_companies) < limit
+        websites.append({
+            "company_id": str(company.id),
+            "company_name": company.name,
+            "url": normalized_url,
+            "domain": domain,
+            "selected": selected,
+            "status": "selected" if selected else "not_scraped_limit",
+        })
+        if selected:
+            selected_companies.append(company)
+
+    return websites, selected_companies
 
 
 def build_duckduckgo_queries(category: str, location: str) -> List[str]:
@@ -135,7 +182,7 @@ def discover_campaign_async(run_id: str):
         logger.warning(f"Task already executing for key {lock_key}. Skipping execution.")
         return {"status": "Skipped", "reason": "Task lock already held."}
 
-    logger.info(f"Lock acquired for prospecting task: {lock_key}")
+    logger.debug(f"Lock acquired for prospecting task: {lock_key}")
     broadcast_progress(run_id, "queued", 5, "Initializing task runner...")
 
     run = DiscoveryRunRepository.get_run(run_id)
@@ -209,7 +256,7 @@ def discover_campaign_async(run_id: str):
                 if is_healthy:
                     company_provider_names.append(name)
                 else:
-                    logger.info(f"Skipping unhealthy discovery provider: {name}")
+                    logger.debug(f"Skipping unhealthy discovery provider: {name}")
             except Exception as provider_err:
                 logger.warning(f"Skipping unavailable discovery provider '{name}': {provider_err}")
 
@@ -221,12 +268,12 @@ def discover_campaign_async(run_id: str):
                 if is_healthy:
                     web_provider_names.append(name)
                 else:
-                    logger.info(f"Skipping unhealthy web provider: {name}")
+                    logger.debug(f"Skipping unhealthy web provider: {name}")
             except Exception as provider_err:
                 logger.warning(f"Skipping unavailable web provider '{name}': {provider_err}")
 
         active_providers = company_provider_names + web_provider_names
-        logger.info(f"Active discovery providers: {active_providers}")
+        logger.debug(f"Active discovery providers: {active_providers}")
         trace.event(
             "llm_input_interpretation",
             "Available source tools selected",
@@ -268,7 +315,7 @@ def discover_campaign_async(run_id: str):
                     )
                 
                 if not search_keywords:
-                    logger.info("Discovery Planner deriving search terms using router...")
+                    logger.debug("Discovery Planner deriving search terms using router...")
                     from llm.router import IntelligentRouter
                     import json
                     router = IntelligentRouter()
@@ -282,7 +329,7 @@ def discover_campaign_async(run_id: str):
                         f"Objective: {spec.objective.value}\n"
                         'Return only JSON: {"search_queries":["category one","category two"]}.'
                     )
-                    logger.info("SEARCH_PLANNER_PROMPT prompt=%r", planner_prompt)
+                    logger.debug("SEARCH_PLANNER_PROMPT prompt=%r", planner_prompt)
                     res = router.generate(
                         prompt=planner_prompt,
                         system_prompt="You are a helpful search optimization planner. Respond in raw JSON.",
@@ -293,7 +340,7 @@ def discover_campaign_async(run_id: str):
                             "objective": spec.objective.value
                         }
                     )
-                    logger.info("SEARCH_PLANNER_RESPONSE response=%s", res)
+                    logger.debug("SEARCH_PLANNER_RESPONSE response=%s", res)
                     if res.get("type") == "text":
                         parsed = json.loads(res.get("text", "{}"))
                         search_keywords = parsed.get("search_queries", [])
@@ -350,7 +397,7 @@ def discover_campaign_async(run_id: str):
         for search_keyword in search_keywords:
             words = search_keyword.split()
             if not run.specification_version and (len(words) > 4 or any(w in search_keyword.lower() for w in ["app", "built", "helps", "business", "finding", "routing", "optimis"])):
-                logger.info(f"Optimizing search query with LLM: \"{search_keyword[:40]}...\"")
+                logger.debug(f"Optimizing search query with LLM: \"{search_keyword[:40]}...\"")
                 try:
                     from llm.router import IntelligentRouter
                     import json
@@ -362,7 +409,7 @@ def discover_campaign_async(run_id: str):
                         f"Input: {search_keyword}\n"
                         'Return only JSON: {"keywords":["category one","category two"]}.'
                     )
-                    logger.info("SEARCH_OPTIMIZER_PROMPT prompt=%r", prompt)
+                    logger.debug("SEARCH_OPTIMIZER_PROMPT prompt=%r", prompt)
                     res = router.generate(
                         prompt=prompt,
                         system_prompt="You are a helpful keyword extraction assistant. Respond in raw JSON.",
@@ -372,7 +419,7 @@ def discover_campaign_async(run_id: str):
                             "search_keyword": search_keyword
                         }
                     )
-                    logger.info("SEARCH_OPTIMIZER_RESPONSE response=%s", res)
+                    logger.debug("SEARCH_OPTIMIZER_RESPONSE response=%s", res)
                     original_search_keyword = search_keyword
                     extracted = []
                     if res.get("type") == "text":
@@ -425,7 +472,7 @@ def discover_campaign_async(run_id: str):
                 return (cleaned if cleaned.isupper() else cleaned.title())[:100] or None
 
             for provider_name in company_provider_names:
-                logger.info(
+                logger.debug(
                     f"Running company search for: \"{search_keyword}\" in "
                     f"\"{run.location}\" using provider \"{provider_name}\"..."
                 )
@@ -446,10 +493,10 @@ def discover_campaign_async(run_id: str):
 
                 companies = (tool_result.data or {}).get("companies", [])
                 if not companies:
-                    logger.info(f"Discovery provider '{provider_name}' returned no results; continuing.")
+                    logger.debug(f"Discovery provider '{provider_name}' returned no results; continuing.")
                     continue
 
-                logger.info(f"Discovery provider '{provider_name}' returned {len(companies)} results.")
+                logger.debug(f"Discovery provider '{provider_name}' returned {len(companies)} results.")
                 for c in companies:
                     name = (c.get("name") or "").strip()
                     if not name:
@@ -478,7 +525,7 @@ def discover_campaign_async(run_id: str):
             for provider_name in web_provider_names:
                 web_results = []
                 for query_number, web_query in enumerate(build_duckduckgo_queries(search_keyword, run.location), start=1):
-                    logger.info("Running web search query %s: %r using provider %r", query_number, web_query, provider_name)
+                    logger.debug("Running web search query %s: %r using provider %r", query_number, web_query, provider_name)
                     tool_result = executor.execute(
                         "search_web",
                         {"query": web_query, "limit": 20},
@@ -490,13 +537,13 @@ def discover_campaign_async(run_id: str):
                     web_results = (tool_result.data or {}).get("results", [])
                     if web_results:
                         break
-                    logger.info("Web provider %r returned zero results for query %r; trying fallback query.", provider_name, web_query)
+                    logger.debug("Web provider %r returned zero results for query %r; trying fallback query.", provider_name, web_query)
 
                 if not web_results:
-                    logger.info("Web provider %r exhausted all query variants with zero results.", provider_name)
+                    logger.debug("Web provider %r exhausted all query variants with zero results.", provider_name)
                     continue
 
-                logger.info(f"Web provider '{provider_name}' returned {len(web_results)} results.")
+                logger.debug(f"Web provider '{provider_name}' returned {len(web_results)} results.")
                 for item in web_results:
                     name = (item.get("name") or item.get("title") or "").strip()
                     website = (item.get("url") or "").strip()
@@ -521,7 +568,7 @@ def discover_campaign_async(run_id: str):
                             }
                         )
                     )
-        logger.info(f"Discovered {len(discovered_leads)} raw leads.")
+        logger.debug(f"Discovered {len(discovered_leads)} raw leads.")
 
         # 2. Entity Resolution & Deduplication
         broadcast_progress(run_id, "resolving", 40, "Deduplicating discovered leads...")
@@ -551,10 +598,43 @@ def discover_campaign_async(run_id: str):
                 leads_to_process.append(company)
 
         # 3. Enrichment (Contacts & Suitability Analysis)
-        total_to_enrich = len(leads_to_process)
+        # Keep all resolved websites visible, but only crawl a maximum of five
+        # unique domains during one discovery run.
+        configured_scrape_limit = getattr(
+            settings,
+            "DISCOVERY_MAX_WEBSITES_PER_RUN",
+            MAX_WEBSITES_PER_DISCOVERY,
+        )
+        website_plan, companies_to_enrich = build_website_scrape_plan(
+            leads_to_process,
+            configured_scrape_limit,
+        )
+        trace.event(
+            "website_selection",
+            "Eligible websites listed and scrape budget applied",
+            actor="workflow",
+            input_data={
+                "resolved_leads": len(leads_to_process),
+                "requested_limit": configured_scrape_limit,
+            },
+            output_data={
+                "websites": website_plan,
+                "eligible_count": len(website_plan),
+                "selected_count": len(companies_to_enrich),
+                "limit": MAX_WEBSITES_PER_DISCOVERY,
+            },
+            metadata={
+                "decision_source": "deterministic five-website safety limit",
+                "eligible_count": len(website_plan),
+                "selected_count": len(companies_to_enrich),
+                "limit": MAX_WEBSITES_PER_DISCOVERY,
+            },
+        )
+
+        total_to_enrich = len(companies_to_enrich)
         analyzer = WebsiteAnalyzer(trace_recorder=trace)
 
-        for idx, company in enumerate(leads_to_process):
+        for idx, company in enumerate(companies_to_enrich):
             progress_pct = 40 + int((idx / max(total_to_enrich, 1)) * 50)
             msg = f"Analyzing website and contacts for {company.name} ({idx + 1}/{total_to_enrich})..."
             broadcast_progress(
@@ -563,7 +643,7 @@ def discover_campaign_async(run_id: str):
                 progress_pct,
                 msg
             )
-            logger.info(msg)
+            logger.debug(msg)
             try:
                 # Extract contacts using ContactExtractor
                 ContactExtractor.extract_contacts(company, run_id=run_id)
@@ -590,6 +670,8 @@ def discover_campaign_async(run_id: str):
                 "new_leads": new_count,
                 "duplicates": duplicate_count,
                 "enriched_companies": total_to_enrich,
+                "eligible_websites": len(website_plan),
+                "scrape_limit": MAX_WEBSITES_PER_DISCOVERY,
             },
             metadata={"decision_source": "workflow summary"},
         )
@@ -622,7 +704,7 @@ def discover_campaign_async(run_id: str):
             except Exception:
                 pass
         cache.delete(lock_key)
-        logger.info(f"Lock released for task: {lock_key}")
+        logger.debug(f"Lock released for task: {lock_key}")
 
 
 @shared_task

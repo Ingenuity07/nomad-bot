@@ -36,7 +36,7 @@ class WebsiteAnalyzer:
 
     def analyze_website(self, company: LeadCompany) -> WebsiteAnalysis:
         if not company.website:
-            logger.info(f"No website found for {company.name}. Creating generic low-score analysis.")
+            logger.debug(f"No website found for {company.name}. Creating generic low-score analysis.")
             if self.trace:
                 self.trace.event(
                     "llm_scrape_interpretation",
@@ -61,7 +61,7 @@ class WebsiteAnalyzer:
         scrape_error = None
 
         try:
-            logger.info(f"Fetching website text for analysis: {company.website}")
+            logger.debug(f"Fetching website text for analysis: {company.website}")
             res = requests.get(company.website, headers=headers, timeout=8)
             response_status = res.status_code
             if res.status_code == 200:

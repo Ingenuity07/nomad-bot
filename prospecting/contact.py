@@ -9,7 +9,7 @@ class ContactExtractor:
     @staticmethod
     def extract_contacts(company: LeadCompany, run_id: str = None) -> list:
         if not company.website:
-            logger.info(f"No website resolved for company {company.name}. Skipping contact extraction.")
+            logger.debug(f"No website resolved for company {company.name}. Skipping contact extraction.")
             return []
 
         discovered = []
@@ -25,7 +25,7 @@ class ContactExtractor:
         )
         context = ToolContext(run_id=correlated_run_id, source="workflow")
 
-        logger.info(f"Crawling website via CrawlWebsiteTool: {company.website}")
+        logger.debug(f"Crawling website via CrawlWebsiteTool: {company.website}")
         crawl_res = executor.execute(
             "crawl_website",
             {
@@ -44,7 +44,7 @@ class ContactExtractor:
         if not all_text.strip():
             return []
 
-        logger.info("Parsing contact details via ExtractContactDataTool")
+        logger.debug("Parsing contact details via ExtractContactDataTool")
         extract_res = executor.execute(
             "extract_contact_data",
             {
