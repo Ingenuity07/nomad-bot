@@ -464,3 +464,8 @@ SPECTACULAR_SETTINGS = {
     'SERVE_INCLUDE_SCHEMA': False,
 }
 
+
+# Cap leads collected per discovery run
+PROSPECTING_MAX_LEADS_PER_RUN = int(os.environ.get("PROSPECTING_MAX_LEADS_PER_RUN", 10))
+
+

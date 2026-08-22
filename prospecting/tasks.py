@@ -523,6 +523,13 @@ def discover_campaign_async(run_id: str):
                     )
         logger.info(f"Discovered {len(discovered_leads)} raw leads.")
 
+        # Cap discovered leads list to respect settings.PROSPECTING_MAX_LEADS_PER_RUN limit
+        from django.conf import settings
+        max_leads = getattr(settings, "PROSPECTING_MAX_LEADS_PER_RUN", 10)
+        if len(discovered_leads) > max_leads:
+            logger.info(f"Capping discovered leads from {len(discovered_leads)} to {max_leads} (via settings.PROSPECTING_MAX_LEADS_PER_RUN)")
+            discovered_leads = discovered_leads[:max_leads]
+
         # 2. Entity Resolution & Deduplication
         broadcast_progress(run_id, "resolving", 40, "Deduplicating discovered leads...")
         new_count = 0
@@ -568,7 +575,18 @@ def discover_campaign_async(run_id: str):
                 # Extract contacts using ContactExtractor
                 ContactExtractor.extract_contacts(company, run_id=run_id)
                 # Analyze website using existing LLM analyzer
-                analyzer.analyze_website(company)
+                analysis = analyzer.analyze_website(company)
+                
+                # Circuit Breaker: If the LLM router has failed completely (no healthy providers or
+                # fallback failure), abort the task immediately to avoid wasting crawl time.
+                if analysis and analysis.description == "Analysis request failed.":
+                    reason = analysis.lead_score_reason or ""
+                    if any(err in reason for err in ["No healthy providers available", "fallback options failed", "failed to generate response"]):
+                        logger.error(f"Circuit breaker triggered: LLM Router is unavailable. Reason: {reason}")
+                        raise DiscoveryError(f"Discovery aborted: LLM Router is offline ({reason}).")
+            except DiscoveryError as de:
+                # Re-raise DiscoveryError to propagate and fail the task early
+                raise de
             except Exception as enrich_err:
                 logger.error(f"Enrichment failed for {company.name}: {enrich_err}")
 
