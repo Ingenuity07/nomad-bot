@@ -186,6 +186,63 @@ class WebsiteAnalysis(models.Model):
         return f"Analysis for {self.company.name} (Score: {self.lead_score})"
 
 
+class CampaignLeadInsight(models.Model):
+    """Current, campaign-specific LLM interpretation of a discovered company."""
+
+    FIT_LEVEL_CHOICES = [
+        ('HIGH', 'High'),
+        ('MEDIUM', 'Medium'),
+        ('LOW', 'Low'),
+        ('UNKNOWN', 'Unknown'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(
+        LeadCompany,
+        on_delete=models.CASCADE,
+        related_name='campaign_insights',
+    )
+    campaign = models.ForeignKey(
+        ProspectingCampaign,
+        on_delete=models.CASCADE,
+        related_name='lead_insights',
+    )
+    schema_version = models.PositiveSmallIntegerField(default=1)
+    company_summary = models.TextField(blank=True, default='')
+    industry = models.CharField(max_length=255, blank=True, default='')
+    business_model = models.CharField(max_length=255, blank=True, default='')
+    services = models.JSONField(default=list, blank=True)
+    operational_profile = models.JSONField(default=dict, blank=True)
+    fit_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    fit_level = models.CharField(max_length=20, choices=FIT_LEVEL_CHOICES, default='UNKNOWN')
+    fit_reason = models.TextField(blank=True, default='')
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)
+    positive_factors = models.JSONField(default=list, blank=True)
+    negative_factors = models.JSONField(default=list, blank=True)
+    data_gaps = models.JSONField(default=list, blank=True)
+    recommended_next_step = models.TextField(blank=True, default='')
+    talking_points = models.JSONField(default=list, blank=True)
+    source_urls = models.JSONField(default=list, blank=True)
+    analyzed_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['company', 'campaign'],
+                name='unique_company_campaign_insight',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['campaign', '-fit_score'], name='prospectin_campaig_5a8612_idx'),
+            models.Index(fields=['company', 'campaign'], name='prospectin_company_889c82_idx'),
+        ]
+
+    def __str__(self):
+        score = self.fit_score if self.fit_score is not None else 'pending'
+        return f"{self.company.name} for {self.campaign.name} ({score})"
+
+
 class Evidence(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(LeadCompany, on_delete=models.CASCADE, related_name='evidence_records')

@@ -1,5 +1,6 @@
 import os
 import logging
+import uuid
 from django.http import FileResponse
 from django.db.models import Q
 from rest_framework.views import APIView
@@ -128,7 +129,11 @@ class ProspectingLeadsAPIView(APIView):
 
         # Build filter set
         workspace = get_default_workspace()
-        queryset = LeadCompany.objects.filter(
+        queryset = LeadCompany.objects.select_related(
+            'analysis', 'campaign', 'discovery_run__campaign'
+        ).prefetch_related(
+            'contacts', 'campaign_insights'
+        ).filter(
             Q(campaign__workspace=workspace) |
             Q(discovery_run__campaign__workspace=workspace) |
             Q(discovery_leads__discovery_run__campaign__workspace=workspace) |
@@ -137,7 +142,14 @@ class ProspectingLeadsAPIView(APIView):
         
         if score_min:
             try:
-                queryset = queryset.filter(analysis__lead_score__gte=float(score_min))
+                minimum_score = max(0.0, min(float(score_min), 100.0))
+                insight_filter = Q(campaign_insights__fit_score__gte=minimum_score)
+                if campaign_id:
+                    insight_filter &= Q(campaign_insights__campaign_id=campaign_id)
+                queryset = queryset.filter(
+                    insight_filter |
+                    Q(analysis__lead_score__gte=minimum_score / 10)
+                ).distinct()
             except ValueError:
                 pass
         if location and location.strip():
@@ -176,8 +188,31 @@ class ProspectingLeadsAPIView(APIView):
                 "role": con.role
             } for con in c.contacts.all()]
 
+            insight = None
+            if campaign_id:
+                insight = next(
+                    (item for item in c.campaign_insights.all() if str(item.campaign_id) == str(campaign_id)),
+                    None,
+                )
+            if insight is None:
+                insight = next(iter(c.campaign_insights.all()), None)
+
             analysis_data = {}
-            if hasattr(c, 'analysis'):
+            if insight is not None:
+                analysis_data = {
+                    "id": str(insight.id),
+                    "description": insight.company_summary,
+                    "has_delivery": bool(insight.operational_profile.get('has_delivery')),
+                    "has_scheduling": bool(insight.operational_profile.get('has_scheduling')),
+                    "needs_routing": bool(insight.operational_profile.get('needs_routing')),
+                    "fleet_size_estimate": insight.operational_profile.get('fleet_size_estimate', 'unknown'),
+                    "lead_score": float(insight.fit_score) if insight.fit_score is not None else None,
+                    "lead_score_reason": insight.fit_reason,
+                    "fit_level": insight.fit_level,
+                    "confidence": float(insight.confidence),
+                    "data_gaps": insight.data_gaps,
+                }
+            elif hasattr(c, 'analysis'):
                 analysis_data = {
                     "id": str(c.analysis.id),
                     "description": c.analysis.description,
@@ -185,7 +220,7 @@ class ProspectingLeadsAPIView(APIView):
                     "has_scheduling": c.analysis.has_scheduling,
                     "needs_routing": c.analysis.needs_routing,
                     "fleet_size_estimate": c.analysis.fleet_size_estimate,
-                    "lead_score": int(c.analysis.lead_score * 10),  # Scale 1-10 to 10-100 percentage
+                    "lead_score": min(100, round(float(c.analysis.lead_score) * 10, 1)),
                     "lead_score_reason": c.analysis.lead_score_reason
                 }
 
@@ -384,12 +419,15 @@ class DiscoveryRunLeadsAPIView(ProspectingLeadsAPIView):
     """List leads found in one search execution."""
 
     def get(self, request, pk):
-        if not _visible_discovery_runs().filter(id=pk).exists():
+        run = _visible_discovery_runs().filter(id=pk).first()
+        if run is None:
             return Response(
                 {'error': 'Discovery run not found'},
                 status=status.HTTP_404_NOT_FOUND,
             )
         request.run_id = str(pk)
+        if run.campaign_id:
+            request.campaign_id = str(run.campaign_id)
         return super().get(request)
 
 
@@ -546,21 +584,138 @@ class LeadRefreshAPIView(APIView):
 
 
 class LeadIntelligenceAPIView(APIView):
-    """Compiles single payload of account intelligence summary details."""
+    """Return one efficient, campaign-aware payload for the lead detail page."""
+
+    @staticmethod
+    def _normalise_score(value):
+        """Older website analyses use 0-10; campaign insights use 0-100."""
+        if value is None:
+            return None
+        score = float(value)
+        if score <= 10:
+            score *= 10
+        return round(max(0.0, min(score, 100.0)), 1)
+
+    @staticmethod
+    def _campaign_for(company, requested_campaign_id):
+        membership = Q(companies=company) | Q(discovery_runs__companies=company) | Q(
+            discovery_runs__discovery_leads__company=company
+        )
+        visible = ProspectingCampaign.objects.filter(
+            workspace=get_default_workspace()
+        ).filter(membership).distinct()
+
+        if requested_campaign_id:
+            try:
+                uuid.UUID(str(requested_campaign_id))
+            except (ValueError, TypeError, AttributeError):
+                return None
+            return visible.filter(id=requested_campaign_id).first()
+        if company.campaign_id:
+            return visible.filter(id=company.campaign_id).first()
+        if company.discovery_run_id and company.discovery_run.campaign_id:
+            return visible.filter(id=company.discovery_run.campaign_id).first()
+        return visible.order_by('-created_at').first()
+
+    @staticmethod
+    def _contacts(company):
+        """Merge normalized people and legacy crawl contacts without losing emails."""
+        people = list(company.people.all())
+        contacts = list(PersonSerializer(people, many=True).data)
+        seen_emails = {
+            point['value'].strip().lower()
+            for contact in contacts
+            for point in contact.get('contact_points', [])
+            if point.get('type') == 'EMAIL' and point.get('value')
+        }
+        seen_linkedin = {
+            str(contact.get('linkedin_url', '')).strip().lower()
+            for contact in contacts
+            if contact.get('linkedin_url')
+        }
+
+        for legacy in company.contacts.all():
+            email = (legacy.email or '').strip()
+            linkedin = (legacy.linkedin or '').strip()
+            is_placeholder = email.endswith('@placeholder.com')
+            if (not email or is_placeholder or email.lower() in seen_emails) and (
+                not linkedin or linkedin.lower() in seen_linkedin
+            ):
+                continue
+            points = []
+            if email and not is_placeholder and email.lower() not in seen_emails:
+                points.append({
+                    'id': f'legacy-email-{legacy.id}',
+                    'type': 'EMAIL',
+                    'value': email,
+                    'source': legacy.source,
+                    'verification_status': 'UNKNOWN',
+                    'confidence': 1.0,
+                })
+                seen_emails.add(email.lower())
+            if legacy.phone:
+                points.append({
+                    'id': f'legacy-phone-{legacy.id}',
+                    'type': 'PHONE',
+                    'value': legacy.phone,
+                    'source': legacy.source,
+                    'verification_status': 'UNKNOWN',
+                    'confidence': 1.0,
+                })
+            if linkedin and linkedin.lower() not in seen_linkedin:
+                points.append({
+                    'id': f'legacy-linkedin-{legacy.id}',
+                    'type': 'LINKEDIN',
+                    'value': linkedin,
+                    'source': legacy.source,
+                    'verification_status': 'UNKNOWN',
+                    'confidence': 1.0,
+                })
+                seen_linkedin.add(linkedin.lower())
+            contacts.append({
+                'id': str(legacy.id),
+                'name': legacy.name or 'Company contact',
+                'first_name': None,
+                'last_name': None,
+                'title': legacy.role or 'Contact found on company website',
+                'linkedin_url': linkedin or None,
+                'contact_points': points,
+            })
+        return contacts
+
     def get(self, request, pk):
         try:
-            company = LeadCompany.objects.get(id=pk)
-            latest_qual = company.qualifications.order_by('-analysis_version').first()
-            analysis = getattr(company, 'analysis', None)
+            company = LeadCompany.objects.select_related(
+                'analysis', 'campaign', 'discovery_run__campaign'
+            ).prefetch_related(
+                'contacts', 'people__contact_points', 'campaign_insights',
+                'qualifications', 'evidence_records__signal', 'signals__signal',
+                'buying_group_members__person__contact_points', 'guidance_records',
+                'research_runs',
+            ).get(id=pk)
 
-            def normalise_score(value):
-                """Older website analyses use a 0-10 scale; qualifications use 0-100."""
-                if value is None:
-                    return None
-                score = float(value)
-                if score <= 10:
-                    score *= 10
-                return round(max(0.0, min(score, 100.0)), 1)
+            requested_campaign_id = request.query_params.get('campaign_id')
+            campaign = self._campaign_for(company, requested_campaign_id)
+            if requested_campaign_id and campaign is None:
+                return Response(
+                    {"error": "Lead was not found in the requested campaign"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            insight = None
+            if campaign:
+                insight = next(
+                    (item for item in company.campaign_insights.all() if item.campaign_id == campaign.id),
+                    None,
+                )
+            if insight is None and not requested_campaign_id:
+                insight = next(iter(company.campaign_insights.all()), None)
+
+            qualifications = list(company.qualifications.all())
+            if campaign:
+                qualifications = [item for item in qualifications if item.campaign_id == campaign.id]
+            latest_qual = max(qualifications, key=lambda item: item.analysis_version, default=None)
+            analysis = getattr(company, 'analysis', None)
 
             # Build components
             company_data = LeadCompanySerializer(company).data
@@ -585,55 +740,84 @@ class LeadIntelligenceAPIView(APIView):
                     category = run.keyword.strip().rstrip('.')
                 else:
                     category = ""
+            if insight and insight.industry:
+                category = insight.industry
             cleaned_category = category.replace("_", " ")
             company_data["category"] = (
                 cleaned_category if cleaned_category.isupper() else cleaned_category.title()
             ) if cleaned_category else None
-            
             problem_hypothesis = (
-                company.campaign.problem_statement if company.campaign else ""
+                insight.fit_reason if insight else ""
+            ) or (
+                campaign.problem_statement if campaign else ""
             ) or (analysis.lead_score_reason if analysis else "") or ""
 
-            evidence_qs = company.evidence_records.select_related('signal').order_by('-captured_at')
-            signal_qs = company.signals.select_related('signal').order_by('-last_detected_at')
-            evidence_count = evidence_qs.count()
+            evidence_records = list(company.evidence_records.all())
+            if campaign:
+                evidence_records = [
+                    item for item in evidence_records
+                    if item.campaign_id in {None, campaign.id}
+                ]
+            evidence_records.sort(key=lambda item: item.captured_at, reverse=True)
+            signal_records = sorted(
+                company.signals.all(), key=lambda item: item.last_detected_at, reverse=True
+            )
+            evidence_count = len(evidence_records)
             evidence_score = None
             if evidence_count:
-                confidences = [float(item.confidence) for item in evidence_qs]
-                unique_sources = len({item.source_url for item in evidence_qs})
+                confidences = [float(item.confidence) for item in evidence_records]
+                unique_sources = len({item.source_url for item in evidence_records})
                 evidence_score = round(min(
                     (sum(confidences) / evidence_count * 50) + min(unique_sources * 20, 50),
                     100,
                 ), 1)
 
-            analysis_score = normalise_score(analysis.lead_score) if analysis else None
+            insight_score = float(insight.fit_score) if insight and insight.fit_score is not None else None
+            analysis_score = self._normalise_score(analysis.lead_score) if analysis and insight is None else None
             scores = {
-                "problem_fit": round(float(latest_qual.problem_fit_score), 1) if latest_qual else analysis_score,
+                "problem_fit": insight_score if insight_score is not None else (
+                    round(float(latest_qual.problem_fit_score), 1) if latest_qual else analysis_score
+                ),
                 "evidence_strength": round(float(latest_qual.evidence_strength_score), 1) if latest_qual else evidence_score,
                 "buying_window": round(float(latest_qual.buying_window_score), 1) if latest_qual else None,
-                "overall": round(float(latest_qual.overall_score), 1) if latest_qual else analysis_score,
+                "overall": insight_score if insight_score is not None else (
+                    round(float(latest_qual.overall_score), 1) if latest_qual else analysis_score
+                ),
             }
 
             explanation = {
-                "overall_classification": latest_qual.explanation.get("overall_classification", "UNKNOWN") if latest_qual else "UNKNOWN",
-                "positive_factors": latest_qual.positive_factors if latest_qual else [],
-                "negative_factors": latest_qual.negative_factors if latest_qual else [],
-                "unknowns": latest_qual.unknowns if latest_qual else []
+                "overall_classification": insight.fit_level if insight else (
+                    latest_qual.explanation.get("overall_classification", "UNKNOWN") if latest_qual else "UNKNOWN"
+                ),
+                "positive_factors": insight.positive_factors if insight else (latest_qual.positive_factors if latest_qual else []),
+                "negative_factors": insight.negative_factors if insight else (latest_qual.negative_factors if latest_qual else []),
+                "unknowns": insight.data_gaps if insight else (latest_qual.unknowns if latest_qual else []),
             }
 
-            signals = CompanySignalSerializer(signal_qs, many=True).data
-            evidence = EvidenceSerializer(evidence_qs, many=True).data
-            contacts = PersonSerializer(company.people.all(), many=True).data
-            buying_group = BuyingGroupMemberSerializer(company.buying_group_members.all(), many=True).data
+            signals = CompanySignalSerializer(signal_records, many=True).data
+            evidence = EvidenceSerializer(evidence_records, many=True).data
+            contacts = self._contacts(company)
+            company_data["emails"] = sorted({
+                point["value"]
+                for contact in contacts
+                for point in contact.get("contact_points", [])
+                if point.get("type") == "EMAIL" and point.get("value")
+            })
+            buying_group_records = list(company.buying_group_members.all())
+            if campaign:
+                buying_group_records = [item for item in buying_group_records if item.campaign_id == campaign.id]
+            buying_group = BuyingGroupMemberSerializer(buying_group_records, many=True).data
 
-            guidance_qs = company.guidance_records.order_by('-created_at')
-            if company.campaign:
-                guidance_qs = guidance_qs.filter(campaign=company.campaign)
-            guidance = guidance_qs.first()
+            guidance_records = list(company.guidance_records.all())
+            if campaign:
+                guidance_records = [item for item in guidance_records if item.campaign_id == campaign.id]
+            guidance = max(guidance_records, key=lambda item: item.created_at, default=None)
 
             overall_score = scores["overall"]
             if guidance:
                 recommended_action = guidance.recommended_next_step
+            elif insight and insight.recommended_next_step:
+                recommended_action = insight.recommended_next_step
             elif overall_score is None:
                 recommended_action = "Research this account before outreach"
             elif overall_score >= 75:
@@ -643,13 +827,18 @@ class LeadIntelligenceAPIView(APIView):
             else:
                 recommended_action = "Keep monitoring for a stronger signal"
 
-            latest_research = company.research_runs.filter(
-                status='COMPLETED', completed_at__isnull=False
-            ).order_by('-completed_at').first()
-            latest_evidence = evidence_qs.first()
+            research_runs = [
+                item for item in company.research_runs.all()
+                if item.status == 'COMPLETED' and item.completed_at and (
+                    campaign is None or item.campaign_id in {None, campaign.id}
+                )
+            ]
+            latest_research = max(research_runs, key=lambda item: item.completed_at, default=None)
+            latest_evidence = evidence_records[0] if evidence_records else None
             last_researched = (
                 latest_research.completed_at if latest_research else
                 latest_evidence.captured_at if latest_evidence else
+                insight.analyzed_at if insight else
                 analysis.created_at if analysis else None
             )
             from django.utils import timezone
@@ -658,21 +847,56 @@ class LeadIntelligenceAPIView(APIView):
                 "is_fresh": bool(last_researched and (timezone.now() - last_researched).days <= 30)
             }
 
+            analysis_payload = {
+                "schema_version": insight.schema_version if insight else None,
+                "summary": insight.company_summary if insight else (analysis.description if analysis else ""),
+                "industry": insight.industry if insight else "",
+                "business_model": insight.business_model if insight else "",
+                "services": insight.services if insight else [],
+                "operational_profile": insight.operational_profile if insight else {
+                    "has_delivery": bool(analysis and analysis.has_delivery),
+                    "has_scheduling": bool(analysis and analysis.has_scheduling),
+                    "needs_routing": bool(analysis and analysis.needs_routing),
+                    "fleet_size_estimate": analysis.fleet_size_estimate if analysis else "unknown",
+                },
+                "fit_score": insight_score if insight_score is not None else analysis_score,
+                "fit_level": insight.fit_level if insight else "UNKNOWN",
+                "fit_reason": problem_hypothesis,
+                "confidence": float(insight.confidence) if insight else None,
+                "positive_factors": explanation["positive_factors"],
+                "negative_factors": explanation["negative_factors"],
+                "data_gaps": explanation["unknowns"],
+                "recommended_next_step": recommended_action,
+                "talking_points": (
+                    guidance.talking_points if guidance else
+                    insight.talking_points if insight else
+                    explanation["positive_factors"][:3]
+                ),
+                "analyzed_at": insight.analyzed_at.isoformat() if insight else None,
+            }
+
             return Response({
                 "company": company_data,
+                "campaign": {
+                    "id": str(campaign.id),
+                    "name": campaign.name,
+                    "product_description": campaign.product_description,
+                    "problem_statement": campaign.problem_statement,
+                } if campaign else None,
+                "analysis": analysis_payload,
                 "problem_hypothesis": problem_hypothesis,
                 "scores": scores,
                 "explanation": explanation,
                 "signals": signals,
                 "evidence_timeline": evidence,
                 "source_summary": {
-                    "verifiable_sources": len({item.source_url for item in evidence_qs}),
+                    "verifiable_sources": len({item.source_url for item in evidence_records}),
                     "evidence_records": evidence_count,
                 },
                 "contacts": contacts,
                 "buying_group": buying_group,
                 "recommended_action": recommended_action,
-                "talking_points": guidance.talking_points if guidance else explanation["positive_factors"][:3],
+                "talking_points": analysis_payload["talking_points"],
                 "freshness": freshness
             }, status=status.HTTP_200_OK)
             

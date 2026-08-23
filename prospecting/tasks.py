@@ -655,7 +655,7 @@ def discover_campaign_async(run_id: str):
                 # Extract contacts using ContactExtractor
                 ContactExtractor.extract_contacts(company, run_id=run_id)
                 # Analyze website using existing LLM analyzer
-                analysis = analyzer.analyze_website(company)
+                analysis = analyzer.analyze_website(company, campaign=run.campaign)
                 
                 # Circuit Breaker: If the LLM router has failed completely (no healthy providers or
                 # fallback failure), abort the task immediately to avoid wasting crawl time.

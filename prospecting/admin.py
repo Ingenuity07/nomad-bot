@@ -2,7 +2,7 @@ from django.contrib import admin
 from unfold.admin import ModelAdmin
 from .models import (
     Workspace, ProspectingCampaign, ICPProfile, ProblemSignal,
-    DiscoveryRun, LeadCompany, CompanySource, LeadContact, WebsiteAnalysis,
+    DiscoveryRun, LeadCompany, CompanySource, LeadContact, WebsiteAnalysis, CampaignLeadInsight,
     Evidence, CompanySignal, Qualification, Person, ContactPoint,
     BuyingGroupMember, ResearchRun, ProviderExecution, CampaignEvent,
     TargetList, ListMembership, CampaignEnrollment, SalesGuidance,
@@ -71,6 +71,13 @@ class WebsiteAnalysisAdmin(ModelAdmin):
     list_display = ('company', 'lead_score', 'has_delivery', 'has_scheduling', 'needs_routing', 'created_at')
     list_filter = ('has_delivery', 'has_scheduling', 'needs_routing')
     search_fields = ('company__name',)
+
+
+@admin.register(CampaignLeadInsight)
+class CampaignLeadInsightAdmin(ModelAdmin):
+    list_display = ('company', 'campaign', 'fit_score', 'fit_level', 'confidence', 'analyzed_at')
+    list_filter = ('fit_level', 'campaign')
+    search_fields = ('company__name', 'campaign__name', 'fit_reason')
 
 
 @admin.register(Evidence)
