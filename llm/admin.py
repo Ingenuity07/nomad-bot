@@ -1,18 +1,37 @@
 from django.contrib import admin
+from django.contrib.admin import SimpleListFilter
 from unfold.admin import ModelAdmin
 from llm.models import LLMPrompt, PromptRun, AgentConfig
 
 
+class ActiveListFilter(SimpleListFilter):
+    title = 'Status'
+    parameter_name = 'is_active'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('active', 'Active (Default)'),
+            ('inactive', 'Inactive'),
+            ('all', 'All'),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == 'active' or self.value() is None:
+            return queryset.filter(is_active=True)
+        if self.value() == 'inactive':
+            return queryset.filter(is_active=False)
+        return queryset
+
+
 @admin.register(LLMPrompt)
 class LLMPromptAdmin(ModelAdmin):
-    list_display = ('key', 'version', 'is_active', 'created_at')
-    list_filter = ('is_active',)
+    list_display = ('key', 'version', 'is_active', 'created_at', 'description')
+    list_filter = (ActiveListFilter,)
     search_fields = ('key', 'description')
     ordering = ('key', '-version')
 
     def get_readonly_fields(self, request, obj=None):
         if obj:
-            # Once saved, key and version are immutable to preserve historical records
             return ('key', 'version')
         return ()
 

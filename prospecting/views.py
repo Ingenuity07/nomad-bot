@@ -1383,6 +1383,7 @@ class ProspectingIntakeAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
+        from prospecting.intent.service import ProspectingIntentService
         user = get_default_user()
         objective = request.data.get("objective", "").strip()
         target = request.data.get("target", "").strip()
@@ -1399,22 +1400,26 @@ class ProspectingIntakeAPIView(APIView):
             qualification=qualification
         )
 
-        # 2. Parse request intent asynchronously
+        # 2. Parse request intent asynchronously via Celery
         try:
-            from prospecting.tasks import parse_intent_async
             req.status = 'PARSING'
             req.save()
+
+            from prospecting.tasks import parse_intent_async
             parse_intent_async.delay(str(req.id))
+
             return Response({
                 "request": ProspectingRequestSerializer(req).data,
                 "specification_version": None
             }, status=status.HTTP_202_ACCEPTED)
         except Exception as e:
-            logger.exception("Failed to dispatch intent parser task")
+            logger.exception("Failed to dispatch Celery intent parser task")
+            req.status = 'FAILED'
+            req.save()
             return Response({
-                "request": ProspectingRequestSerializer(req).data,
-                "error": str(e)
-            }, status=status.HTTP_202_ACCEPTED)
+                "error": f"Celery task dispatch failed: {str(e)}. Please ensure Celery worker and broker are running.",
+                "request": ProspectingRequestSerializer(req).data
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ProspectingIntakeDetailAPIView(APIView):

@@ -27,15 +27,43 @@ class LLMPrompt(models.Model):
 
         if not self._state.adding:
             original = LLMPrompt.objects.get(pk=self.pk)
-            from llm.models import PromptRun
-            has_runs = PromptRun.objects.using('telemetry').filter(prompt_key=original.key, prompt_version=original.version).exists()
-            if (original.template != self.template or original.key != self.key) and has_runs:
-                raise ValidationError("Historical templates are immutable once used in a PromptRun.")
+            if original.key != self.key:
+                raise ValidationError("The key of an existing prompt cannot be changed.")
+            if original.version != self.version:
+                raise ValidationError("The version of an existing prompt cannot be changed directly.")
 
     def save(self, *args, **kwargs):
+        from django.db.models import Max
+
+        if getattr(self, '_saving_new_version', False):
+            super().save(*args, **kwargs)
+            return
+
+        if not self._state.adding:
+            original = LLMPrompt.objects.get(pk=self.pk)
+            if original.template != self.template or original.description != self.description:
+                # Mark original record as inactive in database
+                LLMPrompt.objects.filter(pk=original.pk).update(is_active=False)
+
+                # Clone this instance into a new database row
+                self.pk = uuid.uuid4()
+                self._state.adding = True
+
+                # Increment version
+                max_version = LLMPrompt.objects.filter(key=original.key).aggregate(Max('version'))['version__max']
+                self.version = (max_version or original.version or 0) + 1
+                self.is_active = True
+
+                # Set all other versions of this key to inactive
+                LLMPrompt.objects.filter(key=self.key).update(is_active=False)
+            else:
+                if self.is_active:
+                    LLMPrompt.objects.filter(key=self.key).exclude(id=self.id).update(is_active=False)
+        else:
+            if self.is_active:
+                LLMPrompt.objects.filter(key=self.key).exclude(id=self.id).update(is_active=False)
+
         self.full_clean()
-        if self.is_active:
-            LLMPrompt.objects.filter(key=self.key).exclude(id=self.id).update(is_active=False)
         super().save(*args, **kwargs)
 
 

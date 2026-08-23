@@ -294,10 +294,9 @@ class PromptRegistryTestCase(TestCase):
 
     def test_historical_used_prompt_immutability(self):
         from llm.models import LLMPrompt, PromptRun
-        from django.core.exceptions import ValidationError
 
-        p = LLMPrompt.objects.create(key="immutable.test", template="Initial template")
-        
+        p = LLMPrompt.objects.create(key="immutable.test", version=1, template="Initial template", is_active=True)
+
         # Associate with a PromptRun
         PromptRun.objects.using('telemetry').create(
             purpose="test",
@@ -308,10 +307,21 @@ class PromptRegistryTestCase(TestCase):
             prompt_version=p.version
         )
 
-        # Attempt to change the template text
+        # Edit the template text and save
+        v1_id = p.id
         p.template = "Changed template"
-        with self.assertRaises(ValidationError):
-            p.save()
+        p.save()
+
+        # Original prompt record with version 1 remains unchanged in DB with is_active=False
+        p_v1 = LLMPrompt.objects.get(id=v1_id)
+        self.assertEqual(p_v1.template, "Initial template")
+        self.assertFalse(p_v1.is_active)
+        self.assertEqual(p_v1.version, 1)
+
+        # New prompt record version 2 is inserted with the updated template and is_active=True
+        p_v2 = LLMPrompt.objects.get(key="immutable.test", is_active=True)
+        self.assertEqual(p_v2.template, "Changed template")
+        self.assertEqual(p_v2.version, 2)
 
 
 class LLMObservabilityTestCase(TestCase):
@@ -367,7 +377,7 @@ class LLMObservabilityTestCase(TestCase):
         # Setup prompt registry template
         prompt_obj = LLMPrompt.objects.create(key="observe.prompt", version=1, template="Greet {{ name }}", is_active=True)
 
-        router = IntelligentRouter.__new__(IntelligentRouter)
+        router = IntelligentRouter()
         router.adapters = {"test": adapter}
 
         # Run with context
@@ -472,5 +482,135 @@ class TelemetryDatabaseSeparationTestCase(TestCase):
             )
             # The router completed generation despite telemetry persistence failing
             self.assertIsNotNone(res)
+
+
+class LLMPromptVersioningTestCase(TestCase):
+    databases = {'default', 'telemetry'}
+    def test_copy_and_insert_versioning_on_template_edit(self):
+        from llm.models import LLMPrompt
+        from llm.prompts import PromptRegistry
+
+        # 1. Create version 1 prompt
+        v1 = LLMPrompt.objects.create(
+            key="test.versioning.key",
+            version=1,
+            template="Hello v1 {{ name }}",
+            description="Initial version",
+            is_active=True
+        )
+        self.assertEqual(v1.version, 1)
+
+        # Render prompt via registry -> resolves v1
+        rendered1 = PromptRegistry.render("test.versioning.key", {"name": "Alice"})
+        self.assertEqual(rendered1["rendered_prompt"], "Hello v1 Alice")
+        self.assertEqual(rendered1["prompt_version"], 1)
+
+        # 2. Simulate editing the prompt in Django Admin
+        # Fetch the prompt, change template/description, and call save()
+        prompt_to_edit = LLMPrompt.objects.get(pk=v1.id)
+        prompt_to_edit.template = "Hello v2 {{ name }}"
+        prompt_to_edit.description = "Updated version"
+        prompt_to_edit.save()
+
+        # 3. Assert original v1 record is still preserved in DB with is_active=False
+        v1_reloaded = LLMPrompt.objects.get(pk=v1.id)
+        self.assertEqual(v1_reloaded.template, "Hello v1 {{ name }}")
+        self.assertFalse(v1_reloaded.is_active)
+        self.assertEqual(v1_reloaded.version, 1)
+
+        # 4. Assert new v2 record exists in DB with is_active=True
+        v2 = LLMPrompt.objects.get(key="test.versioning.key", is_active=True)
+        self.assertNotEqual(v2.id, v1.id)
+        self.assertEqual(v2.version, 2)
+        self.assertEqual(v2.template, "Hello v2 {{ name }}")
+        self.assertEqual(v2.description, "Updated version")
+
+        # 5. PromptRegistry automatically resolves to the new active v2 version
+        rendered2 = PromptRegistry.render("test.versioning.key", {"name": "Alice"})
+        self.assertEqual(rendered2["rendered_prompt"], "Hello v2 Alice")
+        self.assertEqual(rendered2["prompt_version"], 2)
+
+
+class TestSchemaModel(BaseModel):
+    summary: str = Field(...)
+    score: int = Field(...)
+
+
+class LLMGenericModelRoutingTestCase(TestCase):
+    databases = {'default', 'telemetry'}
+
+    def test_pool_selection_and_priority(self):
+        from llm.enums import LLMComplexity
+        from llm.registry import get_pool_models
+
+        simple_models = [m.model_name for m in get_pool_models(LLMComplexity.SIMPLE)]
+        self.assertEqual(simple_models[0], "gemini-3.1-flash-lite")
+
+        standard_models = [m.model_name for m in get_pool_models(LLMComplexity.STANDARD)]
+        self.assertEqual(standard_models[0], "gemini-3.5-flash")
+
+        complex_models = [m.model_name for m in get_pool_models(LLMComplexity.COMPLEX)]
+        self.assertEqual(complex_models[0], "gemini-3.7-flash")
+
+    def test_structured_output_schema_validation_and_fallback(self):
+        from llm.router import IntelligentRouter
+        from llm.contracts import LLMRequest
+        from llm.enums import LLMOperation, LLMComplexity
+
+        router = IntelligentRouter()
+        router.health_monitor.reset("google")
+
+        # Mock adapters: first model returns bad json schema, second returns valid schema
+        bad_adapter = MagicMock()
+        bad_adapter.model_name = "gemini-3.7-flash"
+        bad_adapter.generate.return_value = {"type": "text", "text": "{\"invalid\": \"json\"}"}
+
+        good_adapter = MagicMock()
+        good_adapter.model_name = "gemini-3.6-flash"
+        good_adapter.generate.return_value = {"type": "text", "text": "{\"summary\": \"Valid\", \"score\": 95}"}
+
+        def mock_get_adapter(cfg):
+            if cfg.model_name == "gemini-3.7-flash":
+                return bad_adapter
+            return good_adapter
+
+        with patch.object(router, "_get_adapter_for_model", side_effect=mock_get_adapter):
+            req = LLMRequest(
+                operation=LLMOperation.STRUCTURED_OUTPUT,
+                complexity=LLMComplexity.COMPLEX,
+                prompt="Generate summary",
+                schema=TestSchemaModel
+            )
+            res = router.execute(req)
+            self.assertTrue(res.is_success())
+            self.assertIsInstance(res.output, TestSchemaModel)
+            self.assertEqual(res.output.summary, "Valid")
+            self.assertEqual(res.output.score, 95)
+            self.assertEqual(res.attempts, 2)
+
+    def test_non_retryable_error_halts_fallback(self):
+        from llm.router import IntelligentRouter
+        from llm.contracts import LLMRequest
+        from llm.enums import LLMOperation, LLMComplexity, LLMErrorCategory
+
+        router = IntelligentRouter()
+        auth_adapter = MagicMock()
+        auth_adapter.model_name = "gemini-3.7-flash"
+        auth_adapter.generate.return_value = {"type": "error", "status_code": 401, "text": "Unauthorized API Key"}
+
+        with patch.object(router, "_get_adapter_for_model", return_value=auth_adapter):
+            req = LLMRequest(
+                operation=LLMOperation.GENERATE,
+                complexity=LLMComplexity.COMPLEX,
+                prompt="Hello"
+            )
+            res = router.execute(req)
+            self.assertFalse(res.is_success())
+            self.assertEqual(res.error_category, LLMErrorCategory.AUTHENTICATION_ERROR)
+            # Must halt on 401 without wasting retries across all pool models
+            self.assertEqual(res.attempts, 1)
+
+
+
 
 

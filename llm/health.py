@@ -43,3 +43,10 @@ class ProviderHealthMonitor:
             self.report_success(provider_name)
             return True
         return False
+
+    def reset(self, provider_name: str = None):
+        """Reset health status for a specific provider or all providers."""
+        if provider_name:
+            self.health_status.pop(provider_name, None)
+        else:
+            self.health_status.clear()

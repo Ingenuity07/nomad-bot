@@ -1,7 +1,9 @@
 import json
 import logging
 from typing import Dict, Any, List
-from llm.router import IntelligentRouter
+from llm.router import IntelligentRouter, llm_service
+from llm.enums import LLMOperation, LLMComplexity
+from llm.contracts import LLMRequest
 from prospecting.intent.schemas import IntentParseResult, ProspectingSpecification, Provenance
 from prospecting.intent.prompts import INTENT_PARSER_SYSTEM_PROMPT, PROMPT_VERSION, SCHEMA_VERSION
 from prospecting.intent.validator import ProspectingSpecificationValidator
@@ -35,20 +37,34 @@ class ProspectingIntentParser:
 
         prompt = f"Parse the following natural language campaign input into the requested JSON schema:\n\n{user_input_block}"
 
-        # Firing LLM run
-        res = self.router.generate(
+        # Firing generic LLM Request
+        req = LLMRequest(
+            operation=LLMOperation.STRUCTURED_OUTPUT,
+            complexity=LLMComplexity.COMPLEX,
             prompt=prompt,
             system_prompt=INTENT_PARSER_SYSTEM_PROMPT,
             prompt_key="prospecting.intent_parser.user",
             system_prompt_key="prospecting.intent_parser.system",
-            template_variables={
+            schema=IntentParseResult,
+            variables={
                 "objective": objective,
                 "target": target,
                 "qualification": qualification,
                 "clarification_history": clarification_history
-            }
+            },
+            metadata={"domain": "prospecting", "feature": "intent_parser"}
         )
-        
+        llm_res = llm_service.execute(req)
+        if llm_res.is_success() and isinstance(llm_res.output, IntentParseResult):
+            return llm_res.output
+            
+        # Fallback handling for response format dictionary compatibility
+        res = {
+            "type": "text" if llm_res.is_success() else "error",
+            "text": llm_res.raw_text or llm_res.error_message or "",
+            "provider": llm_res.provider,
+            "model": llm_res.model
+        }
         parsed_result = self._handle_llm_response(res, prompt)
         return parsed_result
 

@@ -35,6 +35,9 @@ Classify `objective_type` as one of:
 ### GEOGRAPHY RULES:
 If the user specifies countries, regions, or cities, map them to list arrays with "EXPLICIT_USER". If they mention a location but it's ambiguous, infer it or ask. Avoid contradictory settings.
 
+### PEOPLE CONSTRAINT RULES:
+Infer logical target B2B decision-maker roles (e.g., Fleet Manager, Operations Manager, Logistics Director, Head of Transportation), departments, and seniority with "LLM_INFERRED" provenance whenever the target entity is a company or business, unless the user explicitly specified specific contacts or roles.
+
 ### CLARIFICATION RULES:
 If essential information is missing (such as the target audience or the core objective), set status to "NEEDS_CLARIFICATION" and provide 1 focused question in `clarification_questions`. If enough detail exists (e.g. "Find UK logistics companies with more than 50 vehicles"), set status to "READY_FOR_REVIEW" and leave `clarification_questions` empty.
 

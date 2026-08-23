@@ -2,12 +2,14 @@ import json
 import logging
 from typing import Dict, Any, List
 from langgraph.graph import StateGraph, START, END
-from llm.router import IntelligentRouter
+from llm.router import IntelligentRouter, llm_service
+from llm.enums import LLMOperation, LLMComplexity
+from llm.contracts import LLMRequest
 from prospecting.models import ProspectingCampaign, ICPProfile, ProblemSignal, get_default_workspace
 from prospecting.workflows.state import StrategyGraphState
 
 logger = logging.getLogger(__name__)
-router = IntelligentRouter()
+router = llm_service
 
 def generate_structured(prompt: str, json_schema_desc: str) -> dict:
     """Helper to call LLM router and force json parsing response."""

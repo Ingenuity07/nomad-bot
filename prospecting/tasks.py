@@ -781,11 +781,18 @@ def parse_intent_async(request_id: str):
     Asynchronously parses a natural language prospecting intent request.
     """
     from prospecting.intent.service import ProspectingIntentService
+    from prospecting.models import ProspectingRequest
     logger.info(f"Asynchronous parsing task triggered for Request ID: {request_id}")
     try:
         ProspectingIntentService.parse_request(request_id)
         logger.info(f"Asynchronous parsing completed successfully for Request ID: {request_id}")
     except Exception as e:
         logger.exception(f"Asynchronous parsing failed for Request ID: {request_id}: {e}")
+        try:
+            req = ProspectingRequest.objects.get(id=request_id)
+            req.status = 'FAILED'
+            req.save()
+        except Exception:
+            pass
         raise e
 
