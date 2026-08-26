@@ -161,6 +161,8 @@ class CeleryTaskTestCase(TestCase):
         called_tools = [call.args[0] for call in mock_execute.call_args_list]
         self.assertIn("search_companies", called_tools)
         self.assertIn("search_web", called_tools)
+        mock_contact_extractor.extract_contacts.assert_not_called()
+        mock_website_analyzer.analyze_company.assert_not_called()
 
     @patch("llm.tools.executor.ToolExecutor.execute")
     @patch("prospecting.tasks.WebsiteAnalyzer")

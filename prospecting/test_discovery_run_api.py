@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -10,6 +12,7 @@ from prospecting.models import (
     ProspectingCampaign,
     ProspectingRequest,
     ProspectingSpecificationVersion,
+    ResearchRun,
     Workspace,
     get_default_workspace,
 )
@@ -151,4 +154,62 @@ class DiscoveryRunAPITests(APITestCase):
             unrelated.name,
             {lead['name'] for lead in response.data['leads']},
         )
+
+    def test_unresearched_leads_are_returned_with_intelligence_locked(self):
+        response = self.client.get(
+            reverse('discovery-run-leads', kwargs={'pk': self.run.id})
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        lead = next(item for item in response.data['leads'] if item['id'] == str(self.new_lead.id))
+        self.assertTrue(lead['data_locked'])
+        self.assertEqual(lead['research_status'], 'NOT_STARTED')
+        self.assertEqual(lead['contacts'], [])
+        self.assertEqual(lead['analysis'], {})
+        self.assertIsNone(lead['phone'])
+
+        detail = self.client.get(
+            reverse('lead-intelligence', kwargs={'pk': self.new_lead.id}),
+            {'campaign_id': str(self.campaign.id)},
+        )
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertTrue(detail.data['data_locked'])
+        self.assertEqual(detail.data['research_status'], 'NOT_STARTED')
+        self.assertEqual(detail.data['evidence_timeline'], [])
+        self.assertEqual(detail.data['contacts'], [])
+
+    @patch('prospecting.tasks.research_lead_async.delay')
+    def test_queues_single_or_bulk_research_only_after_user_submission(self, research_delay):
+        self.new_lead.website = 'https://leeds-courier.example'
+        self.new_lead.save(update_fields=['website'])
+        self.duplicate_lead.website = 'https://existing-logistics.example'
+        self.duplicate_lead.save(update_fields=['website'])
+
+        response = self.client.post(
+            reverse('discovery-run-research', kwargs={'pk': self.run.id}),
+            {'lead_ids': [str(self.new_lead.id), str(self.duplicate_lead.id)]},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(len(response.data['queued']), 2)
+        self.assertEqual(ResearchRun.objects.filter(campaign=self.campaign, status='QUEUED').count(), 2)
+        self.assertEqual(research_delay.call_count, 2)
+
+    @patch('prospecting.tasks.research_lead_async.delay')
+    def test_rejects_research_for_a_lead_outside_the_selected_run(self, research_delay):
+        unrelated = LeadCompany.objects.create(
+            campaign=self.campaign,
+            name='Unrelated Research Lead',
+            website='https://unrelated.example',
+        )
+
+        response = self.client.post(
+            reverse('discovery-run-research', kwargs={'pk': self.run.id}),
+            {'lead_ids': [str(unrelated.id)]},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(research_delay.call_count, 0)
 

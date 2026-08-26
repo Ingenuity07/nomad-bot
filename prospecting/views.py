@@ -2,14 +2,16 @@ import os
 import logging
 import uuid
 from django.http import FileResponse
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from knowledge_base.models import UserProfile
 
 from prospecting.models import (
-    DiscoveryRun, LeadCompany, LeadContact, WebsiteAnalysis, ProblemSignal,
+    DiscoveryRun, LeadCompany, LeadContact, WebsiteAnalysis, ProblemSignal, ResearchRun,
     Evidence, CompanySignal, Person, ContactPoint, BuyingGroupMember,
     TargetList, ListMembership, CampaignEnrollment, SalesGuidance, ProspectingCampaign,
     EmailSequence, EmailMessage, EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback,
@@ -132,7 +134,7 @@ class ProspectingLeadsAPIView(APIView):
         queryset = LeadCompany.objects.select_related(
             'analysis', 'campaign', 'discovery_run__campaign'
         ).prefetch_related(
-            'contacts', 'campaign_insights'
+            'contacts', 'campaign_insights', 'research_runs'
         ).filter(
             Q(campaign__workspace=workspace) |
             Q(discovery_run__campaign__workspace=workspace) |
@@ -180,7 +182,7 @@ class ProspectingLeadsAPIView(APIView):
 
         leads = []
         for c in paginated_companies:
-            contacts = [{
+            raw_contacts = [{
                 "id": str(con.id),
                 "email": con.email,
                 "phone": con.phone,
@@ -224,16 +226,36 @@ class ProspectingLeadsAPIView(APIView):
                     "lead_score_reason": c.analysis.lead_score_reason
                 }
 
+            campaign_research = [
+                item for item in c.research_runs.all()
+                if not campaign_id or str(item.campaign_id) in {str(campaign_id), 'None'}
+            ]
+            latest_research = max(campaign_research, key=lambda item: item.created_at, default=None)
+            has_analysis = bool(analysis_data)
+            if latest_research and latest_research.status in {'QUEUED', 'RUNNING'}:
+                research_status = latest_research.status
+            elif has_analysis:
+                research_status = 'COMPLETED'
+            elif latest_research:
+                research_status = latest_research.status
+            else:
+                research_status = 'NOT_STARTED'
+            data_locked = not has_analysis
+
             leads.append({
                 "id": str(c.id),
                 "name": c.name,
                 "website": c.website,
-                "phone": c.phone,
+                "phone": None if data_locked else c.phone,
                 "address": c.address,
                 "category": c.category,
                 "rating": c.rating,
-                "contacts": contacts,
-                "analysis": analysis_data,
+                "contacts": [] if data_locked else raw_contacts,
+                "analysis": {} if data_locked else analysis_data,
+                "data_locked": data_locked,
+                "research_status": research_status,
+                "research_run_id": str(latest_research.id) if latest_research else None,
+                "website_available": bool(c.website),
                 "created_at": c.created_at.isoformat()
             })
 
@@ -431,6 +453,61 @@ class DiscoveryRunLeadsAPIView(ProspectingLeadsAPIView):
         return super().get(request)
 
 
+class DiscoveryRunLeadResearchAPIView(APIView):
+    """Queue website research for one to five user-selected leads in a run."""
+
+    def post(self, request, pk):
+        run = _visible_discovery_runs().filter(id=pk).first()
+        if run is None:
+            return Response(
+                {'error': 'Discovery run not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        lead_ids = request.data.get('lead_ids')
+        if not isinstance(lead_ids, list):
+            return Response(
+                {'error': 'lead_ids must be a list'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        lead_ids = list(dict.fromkeys(str(value) for value in lead_ids if value))
+        if not lead_ids or len(lead_ids) > 5:
+            return Response(
+                {'error': 'Select between 1 and 5 leads per research request'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        companies = LeadCompany.objects.filter(
+            Q(discovery_run=run) | Q(discovery_leads__discovery_run=run),
+            id__in=lead_ids,
+        ).distinct()
+        company_map = {str(company.id): company for company in companies}
+        missing = [lead_id for lead_id in lead_ids if lead_id not in company_map]
+        if missing:
+            return Response(
+                {'error': 'One or more selected leads do not belong to this run', 'lead_ids': missing},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queued = []
+        errors = []
+        for lead_id in lead_ids:
+            company = company_map[lead_id]
+            if not company.website:
+                errors.append({'lead_id': lead_id, 'error': 'No website available'})
+                continue
+            research_run, created = queue_lead_research(company, run.campaign, run)
+            queued.append({
+                'lead_id': lead_id,
+                'research_run_id': str(research_run.id),
+                'status': research_run.status,
+                'created': created,
+            })
+
+        response_status = status.HTTP_202_ACCEPTED if queued else status.HTTP_400_BAD_REQUEST
+        return Response({'queued': queued, 'errors': errors}, status=response_status)
+
+
 class ProspectingResetAPIView(APIView):
     """Clears all discovery runs and lead listings from the CRM."""
 
@@ -548,20 +625,68 @@ class LeadBuyingGroupAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+def queue_lead_research(company, campaign=None, discovery_run=None):
+    """Create one durable research run, reusing an active request when present."""
+    active = company.research_runs.filter(
+        campaign=campaign,
+        status__in=['QUEUED', 'RUNNING'],
+    ).order_by('-created_at').first()
+    if active:
+        return active, False
+
+    research_run = ResearchRun.objects.create(
+        company=company,
+        campaign=campaign,
+        status='QUEUED',
+    )
+    try:
+        from prospecting.tasks import research_lead_async
+        research_lead_async.delay(
+            str(research_run.id),
+            str(discovery_run.id) if discovery_run else None,
+        )
+    except Exception as exc:
+        research_run.status = 'FAILED'
+        research_run.error = {'message': str(exc), 'exception_type': type(exc).__name__}
+        research_run.save(update_fields=['status', 'error'])
+        raise
+    return research_run, True
+
+
 class LeadResearchAPIView(APIView):
-    """Triggers the LangGraph website research graph loop asynchronously for the lead company."""
+    """Queue website scraping and LLM analysis for one user-selected lead."""
+
     def post(self, request, pk):
         try:
-            company = LeadCompany.objects.get(id=pk)
-            from prospecting.workflows.research_graph import website_research_graph
-            res = website_research_graph.invoke({
-                "company_id": str(company.id),
-                "campaign_id": str(company.campaign.id) if company.campaign else None,
-                "research_goal": "Perform automated account research on matching signals."
-            })
-            return Response({"status": "research_completed", "visited_urls": res.get("visited_urls", [])}, status=status.HTTP_200_OK)
+            company = LeadCompany.objects.select_related(
+                'campaign', 'discovery_run__campaign'
+            ).get(id=pk)
         except LeadCompany.DoesNotExist:
             return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if not company.website:
+            return Response({"error": "Lead has no website to research"}, status=status.HTTP_400_BAD_REQUEST)
+
+        campaign_id = request.data.get('campaign_id') or request.query_params.get('campaign_id')
+        campaign = None
+        if campaign_id:
+            campaign = ProspectingCampaign.objects.filter(
+                id=campaign_id,
+                workspace=get_default_workspace(),
+            ).first()
+            if campaign is None:
+                return Response({"error": "Campaign not found"}, status=status.HTTP_404_NOT_FOUND)
+        elif company.campaign_id:
+            campaign = company.campaign
+        elif company.discovery_run_id:
+            campaign = company.discovery_run.campaign
+
+        research_run, created = queue_lead_research(company, campaign, company.discovery_run)
+        return Response({
+            "status": research_run.status,
+            "research_run_id": str(research_run.id),
+            "created": created,
+        }, status=status.HTTP_202_ACCEPTED)
 
 
 class LeadRefreshAPIView(APIView):
@@ -716,9 +841,54 @@ class LeadIntelligenceAPIView(APIView):
                 qualifications = [item for item in qualifications if item.campaign_id == campaign.id]
             latest_qual = max(qualifications, key=lambda item: item.analysis_version, default=None)
             analysis = getattr(company, 'analysis', None)
+            company_data = LeadCompanySerializer(company).data
+            relevant_research_runs = [
+                item for item in company.research_runs.all()
+                if campaign is None or item.campaign_id in {None, campaign.id}
+            ]
+            latest_research_attempt = max(
+                relevant_research_runs,
+                key=lambda item: item.created_at,
+                default=None,
+            )
+            has_analysis = bool(insight or analysis)
+            if latest_research_attempt and latest_research_attempt.status in {'QUEUED', 'RUNNING'}:
+                research_status = latest_research_attempt.status
+            elif has_analysis:
+                research_status = 'COMPLETED'
+            elif latest_research_attempt:
+                research_status = latest_research_attempt.status
+            else:
+                research_status = 'NOT_STARTED'
+
+            if not has_analysis:
+                company_data['phone'] = None
+                return Response({
+                    "company": company_data,
+                    "campaign": {
+                        "id": str(campaign.id),
+                        "name": campaign.name,
+                        "product_description": campaign.product_description,
+                        "problem_statement": campaign.problem_statement,
+                    } if campaign else None,
+                    "data_locked": True,
+                    "research_status": research_status,
+                    "research_run_id": str(latest_research_attempt.id) if latest_research_attempt else None,
+                    "analysis": {},
+                    "problem_hypothesis": campaign.problem_statement if campaign else "",
+                    "scores": {"problem_fit": None, "evidence_strength": None, "buying_window": None, "overall": None},
+                    "explanation": {"overall_classification": "LOCKED", "positive_factors": [], "negative_factors": [], "unknowns": []},
+                    "signals": [],
+                    "evidence_timeline": [],
+                    "source_summary": {"verifiable_sources": 0, "evidence_records": 0},
+                    "contacts": [],
+                    "buying_group": [],
+                    "recommended_action": "Select Get lead data to research this account",
+                    "talking_points": [],
+                    "freshness": {"last_researched": None, "is_fresh": False},
+                }, status=status.HTTP_200_OK)
 
             # Build components
-            company_data = LeadCompanySerializer(company).data
             generic_categories = {
                 "", "web search", "service", "point_of_interest", "establishment",
                 "business", "company", "corporate_office",
@@ -897,7 +1067,10 @@ class LeadIntelligenceAPIView(APIView):
                 "buying_group": buying_group,
                 "recommended_action": recommended_action,
                 "talking_points": analysis_payload["talking_points"],
-                "freshness": freshness
+                "freshness": freshness,
+                "data_locked": False,
+                "research_status": research_status,
+                "research_run_id": str(latest_research_attempt.id) if latest_research_attempt else None,
             }, status=status.HTTP_200_OK)
             
         except LeadCompany.DoesNotExist:
@@ -1429,9 +1602,16 @@ class ProspectingIntakeDetailAPIView(APIView):
         try:
             req = ProspectingRequest.objects.get(id=pk, user_profile=user)
             versions = req.spec_versions.order_by('-version')
+            latest_run = req.discovery_runs.order_by('-started_at').first()
             return Response({
                 "request": ProspectingRequestSerializer(req).data,
-                "versions": ProspectingSpecificationVersionSerializer(versions, many=True).data
+                "versions": ProspectingSpecificationVersionSerializer(versions, many=True).data,
+                "latest_run": {
+                    "run_id": str(latest_run.id),
+                    "keyword": latest_run.keyword,
+                    "location": latest_run.location,
+                    "status": latest_run.status,
+                } if latest_run else None,
             }, status=status.HTTP_200_OK)
         except ProspectingRequest.DoesNotExist:
             return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -1550,11 +1730,29 @@ class ProspectingIntakeCancelAPIView(APIView):
     def post(self, request, pk):
         user = get_default_user()
         try:
-            req = ProspectingRequest.objects.get(id=pk, user_profile=user)
-            if req.status == 'CONFIRMED':
-                return Response({"error": "Cannot cancel a request that has already been confirmed."}, status=status.HTTP_400_BAD_REQUEST)
-            req.status = 'CANCELLED'
-            req.save()
+            with transaction.atomic():
+                req = ProspectingRequest.objects.select_for_update().get(id=pk, user_profile=user)
+                active_runs = list(
+                    req.discovery_runs.select_for_update().filter(status__in=['pending', 'queued', 'running'])
+                )
+                for run in active_runs:
+                    run.status = 'cancelled'
+                    run.completed_at = timezone.now()
+                    run.save(update_fields=['status', 'completed_at'])
+
+                req.status = 'CANCELLED'
+                req.save(update_fields=['status', 'updated_at'])
+
+            # Replace any cached running state immediately. The worker also
+            # checks the database between stages and exits cooperatively.
+            from django.core.cache import cache
+            for run in active_runs:
+                cache.set(f"discovery_run:{run.id}:progress", {
+                    "stage": "cancelled",
+                    "progress": 100,
+                    "message": "Discovery run cancelled.",
+                    "status": "cancelled",
+                }, timeout=86400)
             return Response(ProspectingRequestSerializer(req).data, status=status.HTTP_200_OK)
         except ProspectingRequest.DoesNotExist:
             return Response({"error": "Prospecting request not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -1598,6 +1796,13 @@ class ProspectingDiscoverStatusAPIView(APIView):
                     "progress": 100,
                     "message": "Discovery run failed.",
                     "status": "failed"
+                }
+            elif run.status == 'cancelled':
+                progress_data = {
+                    "stage": "cancelled",
+                    "progress": 100,
+                    "message": "Discovery run cancelled.",
+                    "status": "cancelled"
                 }
             else:
                 progress_data = {

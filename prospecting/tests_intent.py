@@ -291,6 +291,59 @@ class APIEndpointsTestCase(APITestCase):
         req.refresh_from_db()
         self.assertEqual(req.status, "CANCELLED")
 
+    def test_intake_detail_includes_latest_discovery_run(self):
+        req = ProspectingRequest.objects.create(
+            user_profile=self.user,
+            raw_objective="Solar panels",
+            status="CONFIRMED"
+        )
+        run = DiscoveryRun.objects.create(
+            user_profile=self.user,
+            prospecting_request=req,
+            keyword="Roofing companies",
+            location="Leeds",
+            status="running",
+        )
+
+        res = self.client.get(reverse('prospecting-intake-detail', kwargs={'pk': req.id}))
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['latest_run']['run_id'], str(run.id))
+        self.assertEqual(res.data['latest_run']['status'], 'running')
+
+    def test_cancel_confirmed_intake_stops_active_discovery_run(self):
+        req = ProspectingRequest.objects.create(
+            user_profile=self.user,
+            raw_objective="Solar panels",
+            status="CONFIRMED"
+        )
+        run = DiscoveryRun.objects.create(
+            user_profile=self.user,
+            prospecting_request=req,
+            keyword="Roofing companies",
+            location="Leeds",
+            status="running",
+        )
+
+        res = self.client.post(reverse('prospecting-intake-cancel', kwargs={'pk': req.id}))
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        req.refresh_from_db()
+        run.refresh_from_db()
+        self.assertEqual(req.status, 'CANCELLED')
+        self.assertEqual(run.status, 'cancelled')
+        self.assertIsNotNone(run.completed_at)
+
+        worker_result = original_discover_campaign_async(str(run.id))
+        run.refresh_from_db()
+        self.assertEqual(worker_result['status'], 'cancelled')
+        self.assertEqual(run.status, 'cancelled')
+
+        status_res = self.client.get(reverse('prospecting-discover-status', kwargs={'pk': run.id}))
+        self.assertEqual(status_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(status_res.data['status'], 'cancelled')
+        self.assertEqual(status_res.data['stage'], 'cancelled')
+
 
 class IntegrationFlowTestCase(TestCase):
     databases = {'default', 'telemetry'}

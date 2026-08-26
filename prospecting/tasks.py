@@ -8,6 +8,7 @@ import threading
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.utils import timezone
 
 def safe_async_to_sync(func, *args, **kwargs):
     """
@@ -50,6 +51,16 @@ from prospecting.discovery.tracing import DiscoveryTraceRecorder
 logger = logging.getLogger(__name__)
 
 MAX_WEBSITES_PER_DISCOVERY = 5
+
+
+class DiscoveryRunCancelled(Exception):
+    """Stop a discovery worker after the user cancels its run."""
+
+
+def ensure_discovery_run_active(run: DiscoveryRun):
+    run.refresh_from_db(fields=['status'])
+    if run.status == 'cancelled':
+        raise DiscoveryRunCancelled(f"Discovery run {run.id} was cancelled.")
 
 
 def build_website_scrape_plan(companies, requested_limit: int = MAX_WEBSITES_PER_DISCOVERY):
@@ -115,11 +126,12 @@ def build_duckduckgo_queries(category: str, location: str) -> List[str]:
     return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
 
 def broadcast_progress(run_id: str, stage: str, progress: int, message: str):
+    terminal_statuses = {'failed', 'completed', 'cancelled'}
     cache.set(f"discovery_run:{run_id}:progress", {
         "stage": stage,
         "progress": progress,
         "message": message,
-        "status": "failed" if stage == "failed" else ("completed" if stage == "completed" else "running")
+        "status": stage if stage in terminal_statuses else "running"
     }, timeout=86400)
 
     channel_layer = get_channel_layer()
@@ -201,6 +213,7 @@ def discover_campaign_async(run_id: str):
 
     ctx_manager = None
     try:
+        ensure_discovery_run_active(run)
         from llm.context import LLMRequestContext
         
         metadata = {
@@ -227,8 +240,16 @@ def discover_campaign_async(run_id: str):
         except Exception as campaign_err:
             logger.warning(f"Could not ensure campaign for run {run_id}: {campaign_err}")
 
+        started = DiscoveryRun.objects.filter(id=run.id).exclude(status='cancelled').update(status='running')
+        if not started:
+            raise DiscoveryRunCancelled(f"Discovery run {run.id} was cancelled before it started.")
         run.status = 'running'
-        run.save()
+        if run.prospecting_request_id:
+            from prospecting.models import ProspectingRequest
+            ProspectingRequest.objects.filter(
+                id=run.prospecting_request_id,
+                status__in=['CONFIRMED', 'EXECUTING'],
+            ).update(status='EXECUTING')
 
         # 1. Initialize Tool Platform
         import os
@@ -395,6 +416,7 @@ def discover_campaign_async(run_id: str):
         seen_lead_keys = set()
         
         for search_keyword in search_keywords:
+            ensure_discovery_run_active(run)
             words = search_keyword.split()
             if not run.specification_version and (len(words) > 4 or any(w in search_keyword.lower() for w in ["app", "built", "helps", "business", "finding", "routing", "optimis"])):
                 logger.debug(f"Optimizing search query with LLM: \"{search_keyword[:40]}...\"")
@@ -472,6 +494,7 @@ def discover_campaign_async(run_id: str):
                 return (cleaned if cleaned.isupper() else cleaned.title())[:100] or None
 
             for provider_name in company_provider_names:
+                ensure_discovery_run_active(run)
                 logger.debug(
                     f"Running company search for: \"{search_keyword}\" in "
                     f"\"{run.location}\" using provider \"{provider_name}\"..."
@@ -525,6 +548,7 @@ def discover_campaign_async(run_id: str):
             for provider_name in web_provider_names:
                 web_results = []
                 for query_number, web_query in enumerate(build_duckduckgo_queries(search_keyword, run.location), start=1):
+                    ensure_discovery_run_active(run)
                     logger.debug("Running web search query %s: %r using provider %r", query_number, web_query, provider_name)
                     tool_result = executor.execute(
                         "search_web",
@@ -578,12 +602,14 @@ def discover_campaign_async(run_id: str):
             discovered_leads = discovered_leads[:max_leads]
 
         # 2. Entity Resolution & Deduplication
+        ensure_discovery_run_active(run)
         broadcast_progress(run_id, "resolving", 40, "Deduplicating discovered leads...")
         new_count = 0
         duplicate_count = 0
         leads_to_process = []
 
         for item in discovered_leads:
+            ensure_discovery_run_active(run)
             existing = Deduplicator.find_existing_company(item)
             if existing:
                 duplicate_count += 1
@@ -604,78 +630,53 @@ def discover_campaign_async(run_id: str):
                 DiscoveryLead.objects.get_or_create(discovery_run=run, company=company)
                 leads_to_process.append(company)
 
-        # 3. Enrichment (Contacts & Suitability Analysis)
-        # Keep all resolved websites visible, but only crawl a maximum of five
-        # unique domains during one discovery run.
-        configured_scrape_limit = getattr(
-            settings,
-            "DISCOVERY_MAX_WEBSITES_PER_RUN",
-            MAX_WEBSITES_PER_DISCOVERY,
-        )
-        website_plan, companies_to_enrich = build_website_scrape_plan(
-            leads_to_process,
-            configured_scrape_limit,
-        )
+        # 3. Candidate handoff
+        # Discovery stops after finding and resolving candidates. Website crawling,
+        # contact extraction, and LLM analysis only begin after the user explicitly
+        # selects leads from the campaign page.
+        website_plan, _ = build_website_scrape_plan(leads_to_process, 0)
+        for website in website_plan:
+            website["status"] = "awaiting_user_selection"
         trace.event(
             "website_selection",
-            "Eligible websites listed and scrape budget applied",
+            "Eligible websites listed for user selection",
             actor="workflow",
             input_data={
                 "resolved_leads": len(leads_to_process),
-                "requested_limit": configured_scrape_limit,
             },
             output_data={
                 "websites": website_plan,
                 "eligible_count": len(website_plan),
-                "selected_count": len(companies_to_enrich),
+                "selected_count": 0,
                 "limit": MAX_WEBSITES_PER_DISCOVERY,
             },
             metadata={
-                "decision_source": "deterministic five-website safety limit",
+                "decision_source": "manual user selection required",
                 "eligible_count": len(website_plan),
-                "selected_count": len(companies_to_enrich),
+                "selected_count": 0,
                 "limit": MAX_WEBSITES_PER_DISCOVERY,
             },
         )
 
-        total_to_enrich = len(companies_to_enrich)
-        analyzer = WebsiteAnalyzer(trace_recorder=trace)
-
-        for idx, company in enumerate(companies_to_enrich):
-            progress_pct = 40 + int((idx / max(total_to_enrich, 1)) * 50)
-            msg = f"Analyzing website and contacts for {company.name} ({idx + 1}/{total_to_enrich})..."
-            broadcast_progress(
-                run_id,
-                "researching",
-                progress_pct,
-                msg
-            )
-            logger.debug(msg)
-            try:
-                # Extract contacts using ContactExtractor
-                ContactExtractor.extract_contacts(company, run_id=run_id)
-                # Analyze website using existing LLM analyzer
-                analysis = analyzer.analyze_website(company, campaign=run.campaign)
-                
-                # Circuit Breaker: If the LLM router has failed completely (no healthy providers or
-                # fallback failure), abort the task immediately to avoid wasting crawl time.
-                if analysis and analysis.description == "Analysis request failed.":
-                    reason = analysis.lead_score_reason or ""
-                    if any(err in reason for err in ["No healthy providers available", "fallback options failed", "failed to generate response"]):
-                        logger.error(f"Circuit breaker triggered: LLM Router is unavailable. Reason: {reason}")
-                        raise DiscoveryError(f"Discovery aborted: LLM Router is offline ({reason}).")
-            except DiscoveryError as de:
-                # Re-raise DiscoveryError to propagate and fail the task early
-                raise de
-            except Exception as enrich_err:
-                logger.error(f"Enrichment failed for {company.name}: {enrich_err}")
-
-        # 4. Finalize Run
+        # 4. Finalize candidate discovery
+        ensure_discovery_run_active(run)
+        completed = DiscoveryRun.objects.filter(id=run.id).exclude(status='cancelled').update(
+            status='completed',
+            total_leads_found=len(discovered_leads),
+            completed_at=timezone.now(),
+        )
+        if not completed:
+            raise DiscoveryRunCancelled(f"Discovery run {run.id} was cancelled before completion.")
         run.status = 'completed'
         run.total_leads_found = len(discovered_leads)
-        run.save()
 
-        broadcast_progress(run_id, "completed", 100, "Discovery and enrichment finished.")
+        if run.prospecting_request_id:
+            from prospecting.models import ProspectingRequest
+            ProspectingRequest.objects.filter(
+                id=run.prospecting_request_id,
+            ).exclude(status='CANCELLED').update(status='COMPLETED')
+
+        broadcast_progress(run_id, "completed", 100, "Candidate discovery finished. Select leads to research.")
         broadcast_completion(run_id, len(discovered_leads), new_count, duplicate_count)
 
         trace.event(
@@ -687,9 +688,10 @@ def discover_campaign_async(run_id: str):
                 "leads_found": len(discovered_leads),
                 "new_leads": new_count,
                 "duplicates": duplicate_count,
-                "enriched_companies": total_to_enrich,
+                "enriched_companies": 0,
                 "eligible_websites": len(website_plan),
                 "scrape_limit": MAX_WEBSITES_PER_DISCOVERY,
+                "research_requires_selection": True,
             },
             metadata={"decision_source": "workflow summary"},
         )
@@ -702,10 +704,37 @@ def discover_campaign_async(run_id: str):
             "duplicates": duplicate_count
         }
 
+    except DiscoveryRunCancelled:
+        if run.prospecting_request_id:
+            from prospecting.models import ProspectingRequest
+            ProspectingRequest.objects.filter(id=run.prospecting_request_id).update(status='CANCELLED')
+        broadcast_progress(run_id, "cancelled", 100, "Discovery run cancelled.")
+        trace.event(
+            "cancellation",
+            "Discovery cancelled by the user",
+            actor="user",
+            status="success",
+        )
+        return {"status": "cancelled", "run_id": run_id}
     except Exception as e:
         logger.exception(f"Async prospecting run failed for ID: {run_id}")
+        run.refresh_from_db(fields=['status'])
+        if run.status == 'cancelled':
+            if run.prospecting_request_id:
+                from prospecting.models import ProspectingRequest
+                ProspectingRequest.objects.filter(id=run.prospecting_request_id).update(status='CANCELLED')
+            broadcast_progress(run_id, "cancelled", 100, "Discovery run cancelled.")
+            return {"status": "cancelled", "run_id": run_id}
+        failed = DiscoveryRun.objects.filter(id=run.id).exclude(status='cancelled').update(status='failed')
+        if not failed:
+            broadcast_progress(run_id, "cancelled", 100, "Discovery run cancelled.")
+            return {"status": "cancelled", "run_id": run_id}
         run.status = 'failed'
-        run.save()
+        if run.prospecting_request_id:
+            from prospecting.models import ProspectingRequest
+            ProspectingRequest.objects.filter(
+                id=run.prospecting_request_id,
+            ).exclude(status='CANCELLED').update(status='FAILED')
         broadcast_progress(run_id, "failed", 100, f"Error: {str(e)}")
         trace.event(
             "error",
@@ -723,6 +752,53 @@ def discover_campaign_async(run_id: str):
                 pass
         cache.delete(lock_key)
         logger.debug(f"Lock released for task: {lock_key}")
+
+
+@shared_task(time_limit=600)
+def research_lead_async(research_run_id: str, discovery_run_id: str | None = None):
+    """Crawl and analyze one lead after an explicit user selection."""
+    from prospecting.models import ResearchRun
+    from prospecting.workflows.research_graph import website_research_graph
+
+    research_run = ResearchRun.objects.select_related('company', 'campaign').get(id=research_run_id)
+    company = research_run.company
+    research_run.status = 'RUNNING'
+    research_run.started_at = timezone.now()
+    research_run.error = {}
+    research_run.save(update_fields=['status', 'started_at', 'error'])
+
+    try:
+        if not company.website:
+            raise DiscoveryError('Lead has no website to research.')
+
+        ContactExtractor.extract_contacts(company, run_id=discovery_run_id)
+        result = website_research_graph.invoke({
+            "company_id": str(company.id),
+            "campaign_id": str(research_run.campaign_id) if research_run.campaign_id else None,
+            "research_goal": "Scrape the selected lead website and analyze its campaign fit.",
+        })
+
+        if research_run.campaign_id:
+            from prospecting.qualification.scoring import OverallQualificationScorer
+            OverallQualificationScorer.run_scoring(company, research_run.campaign)
+
+        research_run.status = 'COMPLETED'
+        research_run.completed_at = timezone.now()
+        research_run.error = {}
+        research_run.save(update_fields=['status', 'completed_at', 'error'])
+        return {
+            "status": "completed",
+            "research_run_id": str(research_run.id),
+            "company_id": str(company.id),
+            "visited_urls": result.get("visited_urls", []),
+        }
+    except Exception as exc:
+        research_run.status = 'FAILED'
+        research_run.completed_at = timezone.now()
+        research_run.error = {"message": str(exc), "exception_type": type(exc).__name__}
+        research_run.save(update_fields=['status', 'completed_at', 'error'])
+        logger.exception("Manual lead research failed for company %s", company.id)
+        raise
 
 
 @shared_task
