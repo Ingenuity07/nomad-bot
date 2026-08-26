@@ -755,8 +755,11 @@ class LeadEnrichContextAPIView(APIView):
             "website": company.website,
             "is_website_usable": is_website_usable,
             "current_contact_count": current_contact_count,
+            "contacts_count": current_contact_count,
+            "sources_count": company.evidence.count() if hasattr(company, 'evidence') else 0,
             "enrichment_status": status_val,
             "can_enrich": can_enrich,
+            "can_run": can_enrich,
             "reason": reason,
         }, status=status.HTTP_200_OK)
 
@@ -851,9 +854,16 @@ class LeadQualifyContextAPIView(APIView):
                 "product_description": campaign.product_description if campaign else None,
                 "problem_statement": campaign.problem_statement if campaign else None,
             },
+            "prompt_context": {
+                "target_description": campaign.product_description if campaign else None,
+                "problem_statement": campaign.problem_statement if campaign else None,
+            },
             "current_enrichment_status": company.enrichment_status,
+            "enrichment_status": company.enrichment_status,
             "current_qualification_status": qual_status,
+            "qualification_status": qual_status,
             "can_qualify": can_qualify,
+            "can_run": can_qualify,
             "reason": reason,
         }, status=status.HTTP_200_OK)
 
