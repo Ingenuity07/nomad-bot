@@ -171,9 +171,11 @@ def broadcast_completion(run_id: str, discovered: int, new_companies: int, dupli
     retry_backoff=True,
     time_limit=600
 )
-def discover_campaign_async(run_id: str):
+def discover_campaign_async(run_id: str, enrich_leads: bool = False):
     """
-    Celery task to run the business discovery and lead enrichment asynchronously in the background.
+    Celery task to run business discovery asynchronously in the background.
+    When enrich_leads is False (default), discovery completes after persisting LeadCompany
+    and DiscoveryLead records without running downstream contact scraping or qualification.
     """
     lock_key = f"lock:discover_campaign_async:{run_id}"
     lock_acquired = cache.add(lock_key, "locked", timeout=1200)
@@ -605,77 +607,82 @@ def discover_campaign_async(run_id: str):
                 leads_to_process.append(company)
 
         # 3. Enrichment (Contacts & Suitability Analysis)
-        # Keep all resolved websites visible, but only crawl a maximum of five
-        # unique domains during one discovery run.
-        configured_scrape_limit = getattr(
-            settings,
-            "DISCOVERY_MAX_WEBSITES_PER_RUN",
-            MAX_WEBSITES_PER_DISCOVERY,
-        )
-        website_plan, companies_to_enrich = build_website_scrape_plan(
-            leads_to_process,
-            configured_scrape_limit,
-        )
-        trace.event(
-            "website_selection",
-            "Eligible websites listed and scrape budget applied",
-            actor="workflow",
-            input_data={
-                "resolved_leads": len(leads_to_process),
-                "requested_limit": configured_scrape_limit,
-            },
-            output_data={
-                "websites": website_plan,
-                "eligible_count": len(website_plan),
-                "selected_count": len(companies_to_enrich),
-                "limit": MAX_WEBSITES_PER_DISCOVERY,
-            },
-            metadata={
-                "decision_source": "deterministic five-website safety limit",
-                "eligible_count": len(website_plan),
-                "selected_count": len(companies_to_enrich),
-                "limit": MAX_WEBSITES_PER_DISCOVERY,
-            },
-        )
+        total_to_enrich = 0
+        website_plan = []
 
-        total_to_enrich = len(companies_to_enrich)
-        analyzer = WebsiteAnalyzer(trace_recorder=trace)
-
-        for idx, company in enumerate(companies_to_enrich):
-            progress_pct = 40 + int((idx / max(total_to_enrich, 1)) * 50)
-            msg = f"Analyzing website and contacts for {company.name} ({idx + 1}/{total_to_enrich})..."
-            broadcast_progress(
-                run_id,
-                "researching",
-                progress_pct,
-                msg
+        if enrich_leads:
+            # Keep all resolved websites visible, but only crawl a maximum of five
+            # unique domains during one discovery run.
+            configured_scrape_limit = getattr(
+                settings,
+                "DISCOVERY_MAX_WEBSITES_PER_RUN",
+                MAX_WEBSITES_PER_DISCOVERY,
             )
-            logger.debug(msg)
-            try:
-                # Extract contacts using ContactExtractor
-                ContactExtractor.extract_contacts(company, run_id=run_id)
-                # Analyze website using existing LLM analyzer
-                analysis = analyzer.analyze_website(company, campaign=run.campaign)
-                
-                # Circuit Breaker: If the LLM router has failed completely (no healthy providers or
-                # fallback failure), abort the task immediately to avoid wasting crawl time.
-                if analysis and analysis.description == "Analysis request failed.":
-                    reason = analysis.lead_score_reason or ""
-                    if any(err in reason for err in ["No healthy providers available", "fallback options failed", "failed to generate response"]):
-                        logger.error(f"Circuit breaker triggered: LLM Router is unavailable. Reason: {reason}")
-                        raise DiscoveryError(f"Discovery aborted: LLM Router is offline ({reason}).")
-            except DiscoveryError as de:
-                # Re-raise DiscoveryError to propagate and fail the task early
-                raise de
-            except Exception as enrich_err:
-                logger.error(f"Enrichment failed for {company.name}: {enrich_err}")
+            website_plan, companies_to_enrich = build_website_scrape_plan(
+                leads_to_process,
+                configured_scrape_limit,
+            )
+            trace.event(
+                "website_selection",
+                "Eligible websites listed and scrape budget applied",
+                actor="workflow",
+                input_data={
+                    "resolved_leads": len(leads_to_process),
+                    "requested_limit": configured_scrape_limit,
+                },
+                output_data={
+                    "websites": website_plan,
+                    "eligible_count": len(website_plan),
+                    "selected_count": len(companies_to_enrich),
+                    "limit": MAX_WEBSITES_PER_DISCOVERY,
+                },
+                metadata={
+                    "decision_source": "deterministic five-website safety limit",
+                    "eligible_count": len(website_plan),
+                    "selected_count": len(companies_to_enrich),
+                    "limit": MAX_WEBSITES_PER_DISCOVERY,
+                },
+            )
+
+            total_to_enrich = len(companies_to_enrich)
+            analyzer = WebsiteAnalyzer(trace_recorder=trace)
+
+            for idx, company in enumerate(companies_to_enrich):
+                progress_pct = 40 + int((idx / max(total_to_enrich, 1)) * 50)
+                msg = f"Analyzing website and contacts for {company.name} ({idx + 1}/{total_to_enrich})..."
+                broadcast_progress(
+                    run_id,
+                    "researching",
+                    progress_pct,
+                    msg
+                )
+                logger.debug(msg)
+                try:
+                    # Extract contacts using ContactExtractor
+                    ContactExtractor.extract_contacts(company, run_id=run_id)
+                    # Analyze website using existing LLM analyzer
+                    analysis = analyzer.analyze_website(company, campaign=run.campaign)
+                    
+                    # Circuit Breaker: If the LLM router has failed completely (no healthy providers or
+                    # fallback failure), abort the task immediately to avoid wasting crawl time.
+                    if analysis and analysis.description == "Analysis request failed.":
+                        reason = analysis.lead_score_reason or ""
+                        if any(err in reason for err in ["No healthy providers available", "fallback options failed", "failed to generate response"]):
+                            logger.error(f"Circuit breaker triggered: LLM Router is unavailable. Reason: {reason}")
+                            raise DiscoveryError(f"Discovery aborted: LLM Router is offline ({reason}).")
+                except DiscoveryError as de:
+                    # Re-raise DiscoveryError to propagate and fail the task early
+                    raise de
+                except Exception as enrich_err:
+                    logger.error(f"Enrichment failed for {company.name}: {enrich_err}")
 
         # 4. Finalize Run
         run.status = 'completed'
         run.total_leads_found = len(discovered_leads)
         run.save()
 
-        broadcast_progress(run_id, "completed", 100, "Discovery and enrichment finished.")
+        completion_msg = "Discovery finished." if not enrich_leads else "Discovery and enrichment finished."
+        broadcast_progress(run_id, "completed", 100, completion_msg)
         broadcast_completion(run_id, len(discovered_leads), new_count, duplicate_count)
 
         trace.event(

@@ -7,7 +7,7 @@ from rest_framework import status
 from knowledge_base.models import UserProfile
 from prospecting.exceptions import NormalizationError
 from prospecting.models import (
-    DiscoveryRun, LeadCompany, LeadContact, WebsiteAnalysis,
+    DiscoveryRun, LeadCompany, DiscoveryLead, LeadContact, WebsiteAnalysis,
     Workspace, ProspectingCampaign, ICPProfile, ProblemSignal, Evidence, CompanySignal, Qualification,
     Person, ContactPoint, BuyingGroupMember, TargetList, CampaignEnrollment, SalesGuidance,
     EmailSequence, EmailMessage, EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback
@@ -1155,6 +1155,97 @@ class WorkspaceScopeTestCase(TestCase):
         lead_names = [l["name"] for l in res.data["leads"]]
         self.assertIn("Leeds Primary HVAC", lead_names)
         self.assertNotIn("Other Workspace HVAC", lead_names)
+
+
+class DecoupledDiscoveryBoundaryTestCase(TestCase):
+    def setUp(self):
+        self.user = get_default_user()
+        self.run = DiscoveryRun.objects.create(
+            user_profile=self.user,
+            keyword="courier service",
+            location="Leeds, UK"
+        )
+
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.WebsiteAnalyzer")
+    @patch("prospecting.tasks.ContactExtractor")
+    @patch("prospecting.tasks.broadcast_progress")
+    @patch("prospecting.tasks.broadcast_completion")
+    def test_discovery_boundary_decoupled_by_default(
+        self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor,
+        mock_website_analyzer, mock_execute
+    ):
+        """
+        MODULE 1 TEST: Verify discovery completes after persisting LeadCompany and DiscoveryLead,
+        and does NOT automatically call ContactExtractor or WebsiteAnalyzer.
+        """
+        mock_execute.return_value = type("ToolResult", (object,), {
+            "success": True,
+            "data": {
+                "companies": [{
+                    "name": "Leeds Courier Express",
+                    "website": "https://leedscourier.example",
+                    "phone": "+441130000000",
+                    "address": "Leeds, UK",
+                    "category": "Courier Services"
+                }]
+            }
+        })()
+
+        # Run decoupled discovery (enrich_leads=False by default)
+        result = discover_campaign_async(str(self.run.id), enrich_leads=False)
+
+        # 1. Discovery succeeds
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["leads_found"], 1)
+
+        # 2. DiscoveryRun status reaches 'completed'
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "completed")
+
+        # 3. LeadCompany and DiscoveryLead are persisted
+        company = LeadCompany.objects.get(name="Leeds Courier Express")
+        self.assertEqual(company.website, "https://leedscourier.example")
+        self.assertTrue(DiscoveryLead.objects.filter(discovery_run=self.run, company=company).exists())
+
+        # 4. Downstream contact extraction & website analysis were NOT called
+        mock_contact_extractor.extract_contacts.assert_not_called()
+        mock_website_analyzer.return_value.analyze_website.assert_not_called()
+
+        # 5. Metrics survive
+        self.assertEqual(result["new_leads"], 1)
+        self.assertEqual(result["duplicates"], 0)
+
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.WebsiteAnalyzer")
+    @patch("prospecting.tasks.ContactExtractor")
+    @patch("prospecting.tasks.broadcast_progress")
+    @patch("prospecting.tasks.broadcast_completion")
+    def test_legacy_enrich_leads_true_calls_downstream(
+        self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor,
+        mock_website_analyzer, mock_execute
+    ):
+        """
+        Verify passing enrich_leads=True invokes downstream enrichment for backward compatibility.
+        """
+        mock_execute.return_value = type("ToolResult", (object,), {
+            "success": True,
+            "data": {
+                "companies": [{
+                    "name": "Leeds Courier Legacy",
+                    "website": "https://legacycourier.example",
+                    "phone": "+441131111111",
+                    "address": "Leeds, UK",
+                    "category": "Courier Services"
+                }]
+            }
+        })()
+
+        result = discover_campaign_async(str(self.run.id), enrich_leads=True)
+        self.assertEqual(result["status"], "success")
+        mock_contact_extractor.extract_contacts.assert_called_once()
+        mock_website_analyzer.return_value.analyze_website.assert_called_once()
+
 
 
 

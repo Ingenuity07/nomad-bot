@@ -357,6 +357,7 @@ class IntelligentRouter(BaseLLMProvider):
         5. Execute global compatible-model fallback if preferred pool is exhausted.
         6. Return normalized LLMResult.
         """
+        start_time = time.time()
         prompt = request.prompt or ""
         system_prompt = request.system_prompt or ""
         prompt_key = request.prompt_key
@@ -400,8 +401,8 @@ class IntelligentRouter(BaseLLMProvider):
         for config in candidate_configs:
             if config.model_name in attempted_model_keys:
                 continue
-            if not self.health_monitor.is_healthy(config.provider_key):
-                logger.info(f"Provider '{config.provider_key}' is blacklisted/cooldown, skipping model '{config.model_name}'.")
+            if not self.health_monitor.is_healthy(config.provider_key, config.model_name):
+                logger.info(f"Provider/model '{config.provider_key}:{config.model_name}' is blacklisted/cooldown, skipping.")
                 continue
 
             attempted_model_keys.add(config.model_name)
@@ -429,7 +430,7 @@ class IntelligentRouter(BaseLLMProvider):
                 cat = classify_error(status_code, err_text)
                 last_error_category = cat
                 last_error_message = err_text
-                self.health_monitor.report_failure(config.provider_key, status_code=status_code)
+                self.health_monitor.report_failure(config.provider_key, config.model_name, status_code=status_code)
 
                 if cat not in RETRYABLE_ERROR_CATEGORIES:
                     logger.warning(f"Non-retryable error ({cat}) on model '{config.model_name}': {err_text}")
@@ -441,12 +442,13 @@ class IntelligentRouter(BaseLLMProvider):
                         attempts=attempt_count,
                         status="error",
                         error_category=cat,
-                        error_message=err_text
+                        error_message=err_text,
+                        latency_ms=int((time.time() - start_time) * 1000)
                     )
                 continue
 
             # Model produced text or tool call -> report success to health monitor
-            self.health_monitor.report_success(config.provider_key)
+            self.health_monitor.report_success(config.provider_key, config.model_name)
             raw_text = res_dict.get("text", "")
             usage = {
                 "prompt_tokens": res_dict.get("prompt_tokens", 0),
@@ -466,7 +468,8 @@ class IntelligentRouter(BaseLLMProvider):
                         provider=config.provider_key,
                         attempts=attempt_count,
                         status="success",
-                        usage=usage
+                        usage=usage,
+                        latency_ms=int((time.time() - start_time) * 1000)
                     )
                 except (json.JSONDecodeError, ValidationError) as schema_err:
                     last_error_category = LLMErrorCategory.SCHEMA_VALIDATION_FAILED
@@ -484,7 +487,8 @@ class IntelligentRouter(BaseLLMProvider):
                     provider=config.provider_key,
                     attempts=attempt_count,
                     status="success",
-                    usage=usage
+                    usage=usage,
+                    latency_ms=int((time.time() - start_time) * 1000)
                 )
 
         # Global Fallback Loop if preferred pool is exhausted
@@ -492,7 +496,7 @@ class IntelligentRouter(BaseLLMProvider):
         fallback_configs = get_global_fallback_models(exclude_keys=attempted_model_keys)
 
         for config in fallback_configs:
-            if not self.health_monitor.is_healthy(config.provider_key):
+            if not self.health_monitor.is_healthy(config.provider_key, config.model_name):
                 continue
 
             attempted_model_keys.add(config.model_name)
@@ -520,10 +524,10 @@ class IntelligentRouter(BaseLLMProvider):
                 cat = classify_error(status_code, err_text)
                 last_error_category = cat
                 last_error_message = err_text
-                self.health_monitor.report_failure(config.provider_key, status_code=status_code)
+                self.health_monitor.report_failure(config.provider_key, config.model_name, status_code=status_code)
                 continue
 
-            self.health_monitor.report_success(config.provider_key)
+            self.health_monitor.report_success(config.provider_key, config.model_name)
             raw_text = res_dict.get("text", "")
             usage = {
                 "prompt_tokens": res_dict.get("prompt_tokens", 0),
@@ -542,7 +546,8 @@ class IntelligentRouter(BaseLLMProvider):
                         provider=config.provider_key,
                         attempts=attempt_count,
                         status="success",
-                        usage=usage
+                        usage=usage,
+                        latency_ms=int((time.time() - start_time) * 1000)
                     )
                 except (json.JSONDecodeError, ValidationError) as schema_err:
                     last_error_category = LLMErrorCategory.SCHEMA_VALIDATION_FAILED
@@ -559,7 +564,8 @@ class IntelligentRouter(BaseLLMProvider):
                     provider=config.provider_key,
                     attempts=attempt_count,
                     status="success",
-                    usage=usage
+                    usage=usage,
+                    latency_ms=int((time.time() - start_time) * 1000)
                 )
 
         # All candidates failed
@@ -571,7 +577,8 @@ class IntelligentRouter(BaseLLMProvider):
             attempts=attempt_count,
             status="error",
             error_category=last_error_category,
-            error_message=last_error_message
+            error_message=last_error_message,
+            latency_ms=int((time.time() - start_time) * 1000)
         )
 
     def generate(
