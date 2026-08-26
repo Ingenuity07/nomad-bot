@@ -7,10 +7,11 @@ from rest_framework import status
 from knowledge_base.models import UserProfile
 from prospecting.exceptions import NormalizationError
 from prospecting.models import (
-    DiscoveryRun, LeadCompany, LeadContact, WebsiteAnalysis,
-    Workspace, ProspectingCampaign, ICPProfile, ProblemSignal, Evidence, CompanySignal, Qualification,
+    DiscoveryRun, LeadCompany, DiscoveryLead, LeadContact, WebsiteAnalysis,
+    Workspace, ProspectingCampaign, CampaignLeadInsight, ICPProfile, ProblemSignal, Evidence, CompanySignal, Qualification,
     Person, ContactPoint, BuyingGroupMember, TargetList, CampaignEnrollment, SalesGuidance,
-    EmailSequence, EmailMessage, EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback
+    EmailSequence, EmailMessage, EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback,
+    ProspectingRequest, ProspectingSpecificationVersion
 )
 from prospecting.discovery.dto import DiscoveryRequest, DiscoveryResult, DiscoveryResultItem
 from prospecting.discovery.normalizer import Normalizer
@@ -739,7 +740,14 @@ class SalesGuidanceTestCase(TestCase):
         )
         self.company = LeadCompany.objects.create(
             discovery_run=self.run,
-            name="Leeds Courier Pros"
+            name="Leeds Courier Pros",
+            enrichment_status="COMPLETED"
+        )
+        self.insight = CampaignLeadInsight.objects.create(
+            company=self.company,
+            campaign=self.campaign,
+            qualification_status="COMPLETED",
+            buying_group_status="COMPLETED"
         )
         self.person = Person.objects.create(
             company=self.company,
@@ -747,20 +755,8 @@ class SalesGuidanceTestCase(TestCase):
             title="Logistics Specialist"
         )
 
-    @patch("prospecting.views.router.generate")
-    def test_sales_guidance_generation(self, mock_generate):
-        mock_generate.return_value = {
-            "type": "text",
-            "text": (
-                '{"talking_points": ["Save 20% fuel times"],'
-                ' "recommended_angle": "Optimize routes to increase daily drops",'
-                ' "recommended_next_step": "Send email pitching demo request",'
-                ' "message_draft": "Hi Shivam, optimize your routes...",'
-                ' "risks": ["high competitor density"],'
-                ' "unknowns": ["exact fleet count"]}'
-            )
-        }
-
+    @patch("prospecting.tasks.generate_sales_guidance_async.delay")
+    def test_sales_guidance_generation_trigger(self, mock_delay):
         url = reverse("lead-sales-guidance", kwargs={"pk": str(self.company.id)})
         payload = {
             "campaign_id": str(self.campaign.id),
@@ -770,12 +766,15 @@ class SalesGuidanceTestCase(TestCase):
         }
         res = self.client.post(url, data=payload)
         
-        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(res.data["recommended_angle"], "Optimize routes to increase daily drops")
-        self.assertEqual(res.data["message_draft"], "Hi Shivam, optimize your routes...")
-        
-        # Verify persistence record in DB
-        self.assertTrue(SalesGuidance.objects.filter(company=self.company, campaign=self.campaign).exists())
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["sales_guidance_status"], "QUEUED")
+        mock_delay.assert_called_once_with(
+            str(self.company.id),
+            str(self.campaign.id),
+            person_id=str(self.person.id),
+            tone="direct",
+            objective="book_meeting"
+        )
 
 
 class EmailOutreachTestCase(TestCase):
@@ -1157,6 +1156,1281 @@ class WorkspaceScopeTestCase(TestCase):
         lead_names = [l["name"] for l in res.data["leads"]]
         self.assertIn("Leeds Primary HVAC", lead_names)
         self.assertNotIn("Other Workspace HVAC", lead_names)
+
+
+class DecoupledDiscoveryBoundaryTestCase(TestCase):
+    def setUp(self):
+        self.user = get_default_user()
+        self.run = DiscoveryRun.objects.create(
+            user_profile=self.user,
+            keyword="courier service",
+            location="Leeds, UK"
+        )
+
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.WebsiteAnalyzer")
+    @patch("prospecting.tasks.ContactExtractor")
+    @patch("prospecting.tasks.broadcast_progress")
+    @patch("prospecting.tasks.broadcast_completion")
+    def test_discovery_boundary_decoupled_by_default(
+        self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor,
+        mock_website_analyzer, mock_execute
+    ):
+        """
+        MODULE 1 TEST: Verify discovery completes after persisting LeadCompany and DiscoveryLead,
+        and does NOT automatically call ContactExtractor or WebsiteAnalyzer.
+        """
+        mock_execute.return_value = type("ToolResult", (object,), {
+            "success": True,
+            "data": {
+                "companies": [{
+                    "name": "Leeds Courier Express",
+                    "website": "https://leedscourier.example",
+                    "phone": "+441130000000",
+                    "address": "Leeds, UK",
+                    "category": "Courier Services"
+                }]
+            }
+        })()
+
+        # Run decoupled discovery (enrich_leads=False by default)
+        result = discover_campaign_async(str(self.run.id), enrich_leads=False)
+
+        # 1. Discovery succeeds
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["leads_found"], 1)
+
+        # 2. DiscoveryRun status reaches 'completed'
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "completed")
+
+        # 3. LeadCompany and DiscoveryLead are persisted
+        company = LeadCompany.objects.get(name="Leeds Courier Express")
+        self.assertEqual(company.website, "https://leedscourier.example")
+        self.assertTrue(DiscoveryLead.objects.filter(discovery_run=self.run, company=company).exists())
+
+        # 4. Downstream contact extraction & website analysis were NOT called
+        mock_contact_extractor.extract_contacts.assert_not_called()
+        mock_website_analyzer.return_value.analyze_website.assert_not_called()
+
+        # 5. Metrics survive
+        self.assertEqual(result["new_leads"], 1)
+        self.assertEqual(result["duplicates"], 0)
+
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.WebsiteAnalyzer")
+    @patch("prospecting.tasks.ContactExtractor")
+    @patch("prospecting.tasks.broadcast_progress")
+    @patch("prospecting.tasks.broadcast_completion")
+    def test_legacy_enrich_leads_true_calls_downstream(
+        self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor,
+        mock_website_analyzer, mock_execute
+    ):
+        """
+        Verify passing enrich_leads=True invokes downstream enrichment for backward compatibility.
+        """
+        mock_execute.return_value = type("ToolResult", (object,), {
+            "success": True,
+            "data": {
+                "companies": [{
+                    "name": "Leeds Courier Legacy",
+                    "website": "https://legacycourier.example",
+                    "phone": "+441131111111",
+                    "address": "Leeds, UK",
+                    "category": "Courier Services"
+                }]
+            }
+        })()
+
+        result = discover_campaign_async(str(self.run.id), enrich_leads=True)
+        self.assertEqual(result["status"], "success")
+        mock_contact_extractor.extract_contacts.assert_called_once()
+        mock_website_analyzer.return_value.analyze_website.assert_called_once()
+
+
+import uuid
+
+class LeadContactEnrichmentAPITestCase(TestCase):
+    def setUp(self):
+        self.user = get_default_user()
+        self.company = LeadCompany.objects.create(
+            name="Leeds Logistics Express",
+            website="https://leedslogistics.example",
+            phone="+441139998888",
+            address="Leeds, UK",
+            category="Logistics"
+        )
+        self.company_no_website = LeadCompany.objects.create(
+            name="No Website Ltd",
+            website="",
+            phone="+441130001111",
+            category="Services"
+        )
+
+    # 1. GET context for valid lead
+    def test_get_enrich_context_valid_lead(self):
+        url = reverse("lead-enrich-context", kwargs={"pk": self.company.id})
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["lead_id"], str(self.company.id))
+        self.assertEqual(res.data["company_name"], "Leeds Logistics Express")
+        self.assertEqual(res.data["website"], "https://leedslogistics.example")
+        self.assertTrue(res.data["is_website_usable"])
+        self.assertEqual(res.data["current_contact_count"], 0)
+        self.assertEqual(res.data["enrichment_status"], "NOT_STARTED")
+        self.assertTrue(res.data["can_enrich"])
+        self.assertIsNone(res.data["reason"])
+
+    # 2. GET context for lead without website
+    def test_get_enrich_context_no_website(self):
+        url = reverse("lead-enrich-context", kwargs={"pk": self.company_no_website.id})
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(res.data["is_website_usable"])
+        self.assertFalse(res.data["can_enrich"])
+        self.assertEqual(res.data["reason"], "Lead company website is required for contact enrichment.")
+
+    # 3. GET context for nonexistent lead
+    def test_get_enrich_context_nonexistent_lead(self):
+        url = reverse("lead-enrich-context", kwargs={"pk": uuid.uuid4()})
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    # 4. POST enrichment for valid lead
+    @patch("prospecting.tasks.enrich_lead_contacts_async.delay")
+    def test_post_enrichment_valid_lead(self, mock_delay):
+        url = reverse("lead-enrich", kwargs={"pk": self.company.id})
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["enrichment_status"], "QUEUED")
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.enrichment_status, "QUEUED")
+        mock_delay.assert_called_once_with(str(self.company.id))
+
+    # 5. POST enrichment without website
+    def test_post_enrichment_no_website(self):
+        url = reverse("lead-enrich", kwargs={"pk": self.company_no_website.id})
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["error"], "INVALID_LEAD_WEBSITE")
+        self.assertEqual(res.data["message"], "Lead company website is required for contact enrichment.")
+
+    # 6. POST enrichment for nonexistent lead
+    def test_post_enrichment_nonexistent_lead(self):
+        url = reverse("lead-enrich", kwargs={"pk": uuid.uuid4()})
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    # 7 & 8 & 13. POST enrichment when already QUEUED or RUNNING (Conflict / Idempotency)
+    @patch("prospecting.tasks.enrich_lead_contacts_async.delay")
+    def test_post_enrichment_already_queued_or_running(self, mock_delay):
+        self.company.enrichment_status = 'QUEUED'
+        self.company.save()
+
+        url = reverse("lead-enrich", kwargs={"pk": self.company.id})
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data["error"], "ENRICHMENT_ALREADY_IN_PROGRESS")
+        mock_delay.assert_not_called()
+
+        self.company.enrichment_status = 'RUNNING'
+        self.company.save()
+        res2 = self.client.post(url)
+        self.assertEqual(res2.status_code, status.HTTP_409_CONFLICT)
+        mock_delay.assert_not_called()
+
+    # 9, 10, 14, 15, 16. Celery task execution success -> COMPLETED
+    @patch("prospecting.tasks.WebsiteAnalyzer")
+    @patch("prospecting.tasks.ContactExtractor.extract_contacts")
+    def test_enrich_lead_contacts_async_success(self, mock_extract, mock_website_analyzer):
+        from prospecting.tasks import enrich_lead_contacts_async
+        mock_extract.return_value = [
+            LeadContact(company=self.company, email="ops@leedslogistics.example")
+        ]
+
+        result = enrich_lead_contacts_async(str(self.company.id))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["contacts_count"], 1)
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.enrichment_status, "COMPLETED")
+        self.assertEqual(self.company.enrichment_error, {})
+
+        mock_extract.assert_called_once()
+        mock_website_analyzer.assert_not_called()
+
+    # 11. ContactExtractor failure -> FAILED
+    @patch("prospecting.tasks.ContactExtractor.extract_contacts")
+    def test_enrich_lead_contacts_async_failure(self, mock_extract):
+        from prospecting.tasks import enrich_lead_contacts_async
+        mock_extract.side_effect = Exception("Crawl connection timeout")
+
+        with self.assertRaises(Exception):
+            enrich_lead_contacts_async(str(self.company.id))
+
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.enrichment_status, "FAILED")
+        self.assertEqual(self.company.enrichment_error["error"], "Crawl connection timeout")
+
+    # 12. Failed enrichment can be retried
+    @patch("prospecting.tasks.enrich_lead_contacts_async.delay")
+    def test_failed_enrichment_can_be_retried(self, mock_delay):
+        self.company.enrichment_status = 'FAILED'
+        self.company.enrichment_error = {"error": "Previous crash"}
+        self.company.save()
+
+        url = reverse("lead-enrich", kwargs={"pk": self.company.id})
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["enrichment_status"], "QUEUED")
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.enrichment_status, "QUEUED")
+        mock_delay.assert_called_once_with(str(self.company.id))
+
+
+class LeadQualificationAPITestCase(TestCase):
+    def setUp(self):
+        self.user = get_default_user()
+        self.workspace = getattr(self.user, 'personal_workspace', None) or Workspace.objects.first()
+        self.campaign = ProspectingCampaign.objects.create(
+            workspace=self.workspace,
+            name="Route Optimization Campaign",
+            product_description="SaaS route optimization software",
+            problem_statement="High fuel costs and inefficient delivery routing",
+            status="ACTIVE",
+            created_by=self.user
+        )
+        self.company = LeadCompany.objects.create(
+            campaign=self.campaign,
+            name="Leeds Express Freight",
+            website="https://leedsexfreight.example",
+            phone="+441135556666",
+            address="Leeds, UK",
+            category="Freight",
+            enrichment_status="COMPLETED"
+        )
+        self.company_un_enriched = LeadCompany.objects.create(
+            campaign=self.campaign,
+            name="Un-Enriched Haulage",
+            website="https://unenrichedhaulage.example",
+            category="Haulage",
+            enrichment_status="NOT_STARTED"
+        )
+        self.company_no_website = LeadCompany.objects.create(
+            campaign=self.campaign,
+            name="No Website Express",
+            website="",
+            category="Express",
+            enrichment_status="COMPLETED"
+        )
+
+    # 1. GET qualification context for valid lead
+    def test_get_qualify_context_valid_lead(self):
+        url = reverse("lead-qualify-context", kwargs={"pk": self.company.id})
+        res = self.client.get(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["lead_id"], str(self.company.id))
+        self.assertEqual(res.data["company_name"], "Leeds Express Freight")
+        self.assertEqual(res.data["campaign_id"], str(self.campaign.id))
+        self.assertTrue(res.data["can_qualify"])
+        self.assertIsNone(res.data["reason"])
+        self.assertEqual(res.data["current_qualification_status"], "NOT_STARTED")
+
+    # 2. GET context when prerequisites are missing (enrichment != COMPLETED)
+    def test_get_qualify_context_enrichment_not_ready(self):
+        url = reverse("lead-qualify-context", kwargs={"pk": self.company_un_enriched.id})
+        res = self.client.get(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(res.data["can_qualify"])
+        self.assertEqual(res.data["reason"], "Lead contact enrichment must be completed before qualification.")
+
+    # 3. GET context for nonexistent lead
+    def test_get_qualify_context_nonexistent_lead(self):
+        url = reverse("lead-qualify-context", kwargs={"pk": uuid.uuid4()})
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    # 4. POST qualification for valid lead
+    @patch("prospecting.tasks.qualify_lead_async.delay")
+    def test_post_qualification_valid_lead(self, mock_delay):
+        url = reverse("lead-qualify", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["qualification_status"], "QUEUED")
+        insight = CampaignLeadInsight.objects.get(company=self.company, campaign=self.campaign)
+        self.assertEqual(insight.qualification_status, "QUEUED")
+        mock_delay.assert_called_once_with(str(self.company.id), str(self.campaign.id))
+
+    # 5. POST qualification when prerequisites missing (ENRICHMENT_NOT_READY)
+    def test_post_qualification_enrichment_not_ready(self):
+        url = reverse("lead-qualify", kwargs={"pk": self.company_un_enriched.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["error"], "ENRICHMENT_NOT_READY")
+
+    # 6. POST qualification for nonexistent lead
+    def test_post_qualification_nonexistent_lead(self):
+        url = reverse("lead-qualify", kwargs={"pk": uuid.uuid4()})
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    # 7 & 8 & 13. POST when qualification already QUEUED or RUNNING
+    @patch("prospecting.tasks.qualify_lead_async.delay")
+    def test_post_qualification_already_queued_or_running(self, mock_delay):
+        insight, _ = CampaignLeadInsight.objects.get_or_create(company=self.company, campaign=self.campaign)
+        insight.qualification_status = 'QUEUED'
+        insight.save()
+
+        url = reverse("lead-qualify", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data["error"], "QUALIFICATION_ALREADY_IN_PROGRESS")
+        mock_delay.assert_not_called()
+
+        insight.qualification_status = 'RUNNING'
+        insight.save()
+        res2 = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res2.status_code, status.HTTP_409_CONFLICT)
+        mock_delay.assert_not_called()
+
+    # 9, 10, 14, 15, 16, 17. Celery task execution -> WebsiteAnalyzer -> COMPLETED
+    @patch("prospecting.tasks.WebsiteAnalyzer.analyze_website")
+    @patch("prospecting.qualification.buying_group.BuyingGroupWorkflow")
+    def test_qualify_lead_async_success(self, mock_buying_group, mock_analyze):
+        from prospecting.tasks import qualify_lead_async
+
+        mock_analyze.return_value = type("AnalysisResult", (object,), {
+            "lead_score": 85.0
+        })()
+
+        result = qualify_lead_async(str(self.company.id), str(self.campaign.id))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["qualification_status"], "COMPLETED")
+        self.assertEqual(result["lead_score"], 85.0)
+
+        insight = CampaignLeadInsight.objects.get(company=self.company, campaign=self.campaign)
+        self.assertEqual(insight.qualification_status, "COMPLETED")
+        self.assertEqual(insight.qualification_error, {})
+
+        mock_analyze.assert_called_once()
+        mock_buying_group.assert_not_called()
+
+    # 11. WebsiteAnalyzer failure -> FAILED
+    @patch("prospecting.tasks.WebsiteAnalyzer.analyze_website")
+    def test_qualify_lead_async_failure(self, mock_analyze):
+        from prospecting.tasks import qualify_lead_async
+        mock_analyze.side_effect = Exception("LLM router timeout")
+
+        with self.assertRaises(Exception):
+            qualify_lead_async(str(self.company.id), str(self.campaign.id))
+
+        insight = CampaignLeadInsight.objects.get(company=self.company, campaign=self.campaign)
+        self.assertEqual(insight.qualification_status, "FAILED")
+        self.assertEqual(insight.qualification_error["error"], "LLM router timeout")
+
+    # 12. FAILED qualification can be retried
+    @patch("prospecting.tasks.qualify_lead_async.delay")
+    def test_failed_qualification_can_be_retried(self, mock_delay):
+        insight, _ = CampaignLeadInsight.objects.get_or_create(company=self.company, campaign=self.campaign)
+        insight.qualification_status = 'FAILED'
+        insight.qualification_error = {"error": "Previous crash"}
+        insight.save()
+
+        url = reverse("lead-qualify", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["qualification_status"], "QUEUED")
+        insight.refresh_from_db()
+        self.assertEqual(insight.qualification_status, "QUEUED")
+        mock_delay.assert_called_once_with(str(self.company.id), str(self.campaign.id))
+
+
+class LeadBuyingGroupAPITestCase(TestCase):
+    def setUp(self):
+        self.user = get_default_user()
+        self.workspace = getattr(self.user, 'personal_workspace', None) or Workspace.objects.first()
+        self.campaign = ProspectingCampaign.objects.create(
+            workspace=self.workspace,
+            name="Route Optimization Campaign",
+            product_description="SaaS route optimization software",
+            problem_statement="High fuel costs and inefficient delivery routing",
+            status="ACTIVE",
+            created_by=self.user
+        )
+        self.campaign_other = ProspectingCampaign.objects.create(
+            workspace=self.workspace,
+            name="Fleet Telematics Campaign",
+            product_description="Fleet telematics and hardware",
+            status="ACTIVE",
+            created_by=self.user
+        )
+        self.company = LeadCompany.objects.create(
+            campaign=self.campaign,
+            name="Leeds Express Freight",
+            website="https://leedsexfreight.example",
+            phone="+441135556666",
+            address="Leeds, UK",
+            category="Freight",
+            enrichment_status="COMPLETED"
+        )
+        self.insight = CampaignLeadInsight.objects.create(
+            company=self.company,
+            campaign=self.campaign,
+            qualification_status="COMPLETED",
+            fit_score=88.0,
+            fit_level="HIGH",
+            company_summary="Leading road freight operator in West Yorkshire."
+        )
+
+        self.company_unqualified = LeadCompany.objects.create(
+            campaign=self.campaign,
+            name="Unqualified Logistics",
+            website="https://unqualifiedlogistics.example",
+            enrichment_status="COMPLETED"
+        )
+        self.insight_unqualified = CampaignLeadInsight.objects.create(
+            company=self.company_unqualified,
+            campaign=self.campaign,
+            qualification_status="NOT_STARTED"
+        )
+
+    # 1. GET buying-group context for valid lead
+    def test_get_buying_group_context_valid_lead(self):
+        url = reverse("lead-buying-group-context", kwargs={"pk": self.company.id})
+        res = self.client.get(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["lead_id"], str(self.company.id))
+        self.assertEqual(res.data["company_name"], "Leeds Express Freight")
+        self.assertEqual(res.data["campaign_id"], str(self.campaign.id))
+        self.assertEqual(res.data["qualification_status"], "COMPLETED")
+        self.assertEqual(res.data["buying_group_status"], "NOT_STARTED")
+        self.assertTrue(res.data["can_run"])
+        self.assertIsNone(res.data["reason"])
+        self.assertEqual(res.data["qualification_context"]["fit_score"], 88.0)
+        self.assertEqual(res.data["qualification_context"]["fit_level"], "HIGH")
+
+    # 2. GET context when qualification is not completed
+    def test_get_buying_group_context_qualification_not_ready(self):
+        url = reverse("lead-buying-group-context", kwargs={"pk": self.company_unqualified.id})
+        res = self.client.get(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(res.data["can_run"])
+        self.assertEqual(res.data["reason"], "Lead qualification must be completed before buying group identification.")
+
+    # 3. GET context for nonexistent lead
+    def test_get_buying_group_context_nonexistent_lead(self):
+        url = reverse("lead-buying-group-context", kwargs={"pk": uuid.uuid4()})
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    # 4. POST buying-group with valid prerequisites
+    @patch("prospecting.tasks.identify_buying_group_async.delay")
+    def test_post_buying_group_valid_lead(self, mock_delay):
+        url = reverse("lead-buying-group", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["buying_group_status"], "QUEUED")
+        self.insight.refresh_from_db()
+        self.assertEqual(self.insight.buying_group_status, "QUEUED")
+        mock_delay.assert_called_once_with(str(self.company.id), str(self.campaign.id))
+
+    # 5, 6. POST when qualification is NOT_STARTED, QUEUED, RUNNING, or FAILED
+    def test_post_buying_group_qualification_not_ready(self):
+        for invalid_status in ["NOT_STARTED", "QUEUED", "RUNNING", "FAILED"]:
+            self.insight_unqualified.qualification_status = invalid_status
+            self.insight_unqualified.save()
+
+            url = reverse("lead-buying-group", kwargs={"pk": self.company_unqualified.id})
+            res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(res.data["error"], "QUALIFICATION_NOT_READY")
+
+    # 7 & 8 & 14. POST when buying group is already QUEUED or RUNNING (Conflict / Idempotency)
+    @patch("prospecting.tasks.identify_buying_group_async.delay")
+    def test_post_buying_group_already_queued_or_running(self, mock_delay):
+        self.insight.buying_group_status = 'QUEUED'
+        self.insight.save()
+
+        url = reverse("lead-buying-group", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data["error"], "BUYING_GROUP_ALREADY_IN_PROGRESS")
+        mock_delay.assert_not_called()
+
+        self.insight.buying_group_status = 'RUNNING'
+        self.insight.save()
+        res2 = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res2.status_code, status.HTTP_409_CONFLICT)
+        mock_delay.assert_not_called()
+
+    # 9, 15, 16, 17. Successful Celery execution -> BuyingGroupWorkflow -> COMPLETED
+    @patch("prospecting.models.SalesGuidance")
+    @patch("prospecting.qualification.buying_group.BuyingGroupWorkflow.run")
+    def test_identify_buying_group_async_success(self, mock_run, mock_sales_guidance):
+        from prospecting.tasks import identify_buying_group_async
+
+        person = Person.objects.create(company=self.company, name="Sarah Jenkins", title="Head of Operations")
+        mock_member = BuyingGroupMember.objects.create(
+            campaign=self.campaign,
+            company=self.company,
+            person=person,
+            role_type="DECISION_MAKER",
+            relevance_score=90
+        )
+        mock_run.return_value = [mock_member]
+
+        result = identify_buying_group_async(str(self.company.id), str(self.campaign.id))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["buying_group_status"], "COMPLETED")
+        self.assertEqual(result["members_count"], 1)
+
+        self.insight.refresh_from_db()
+        self.assertEqual(self.insight.buying_group_status, "COMPLETED")
+        self.assertEqual(self.insight.buying_group_error, {})
+
+        mock_run.assert_called_once()
+        mock_sales_guidance.assert_not_called()
+
+    # 10. Failed Celery execution
+    @patch("prospecting.qualification.buying_group.BuyingGroupWorkflow.run")
+    def test_identify_buying_group_async_failure(self, mock_run):
+        from prospecting.tasks import identify_buying_group_async
+        mock_run.side_effect = Exception("LLM schema parsing failed")
+
+        with self.assertRaises(Exception):
+            identify_buying_group_async(str(self.company.id), str(self.campaign.id))
+
+        self.insight.refresh_from_db()
+        self.assertEqual(self.insight.buying_group_status, "FAILED")
+        self.assertEqual(self.insight.buying_group_error["error"], "LLM schema parsing failed")
+
+    # 11. FAILED buying group can be retried
+    @patch("prospecting.tasks.identify_buying_group_async.delay")
+    def test_failed_buying_group_can_be_retried(self, mock_delay):
+        self.insight.buying_group_status = 'FAILED'
+        self.insight.buying_group_error = {"error": "Previous crash"}
+        self.insight.save()
+
+        url = reverse("lead-buying-group", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["buying_group_status"], "QUEUED")
+        self.insight.refresh_from_db()
+        self.assertEqual(self.insight.buying_group_status, "QUEUED")
+        mock_delay.assert_called_once_with(str(self.company.id), str(self.campaign.id))
+
+    # 13, 18. Campaign isolation for buying group state
+    def test_campaign_isolation_for_buying_group_state(self):
+        insight_other = CampaignLeadInsight.objects.create(
+            company=self.company,
+            campaign=self.campaign_other,
+            qualification_status="NOT_STARTED",
+            buying_group_status="NOT_STARTED"
+        )
+
+        url = reverse("lead-buying-group-context", kwargs={"pk": self.company.id})
+        res_primary = self.client.get(url, {"campaign_id": str(self.campaign.id)})
+        self.assertTrue(res_primary.data["can_run"])
+
+        res_other = self.client.get(url, {"campaign_id": str(self.campaign_other.id)})
+        self.assertFalse(res_other.data["can_run"])
+        self.assertEqual(res_other.data["reason"], "Lead qualification must be completed before buying group identification.")
+
+
+class LeadSalesGuidanceAPITestCase(TestCase):
+    def setUp(self):
+        self.user = get_default_user()
+        self.workspace = getattr(self.user, 'personal_workspace', None) or Workspace.objects.first()
+        self.campaign = ProspectingCampaign.objects.create(
+            workspace=self.workspace,
+            name="Route Optimization Campaign",
+            product_description="SaaS route optimization software",
+            problem_statement="High fuel costs and inefficient delivery routing",
+            status="ACTIVE",
+            created_by=self.user
+        )
+        self.campaign_other = ProspectingCampaign.objects.create(
+            workspace=self.workspace,
+            name="Fleet Telematics Campaign",
+            product_description="Fleet telematics and hardware",
+            status="ACTIVE",
+            created_by=self.user
+        )
+        self.company = LeadCompany.objects.create(
+            campaign=self.campaign,
+            name="Leeds Express Freight",
+            website="https://leedsexfreight.example",
+            phone="+441135556666",
+            address="Leeds, UK",
+            category="Freight",
+            enrichment_status="COMPLETED"
+        )
+        self.person = Person.objects.create(
+            company=self.company,
+            name="Sarah Jenkins",
+            title="Head of Operations"
+        )
+        self.insight = CampaignLeadInsight.objects.create(
+            company=self.company,
+            campaign=self.campaign,
+            qualification_status="COMPLETED",
+            buying_group_status="COMPLETED",
+            sales_guidance_status="NOT_STARTED"
+        )
+        self.member = BuyingGroupMember.objects.create(
+            campaign=self.campaign,
+            company=self.company,
+            person=self.person,
+            role_type="DECISION_MAKER",
+            relevance_score=90
+        )
+        self.evidence = Evidence.objects.create(
+            company=self.company,
+            source_type="WEBSITE",
+            source_url="https://leedsexfreight.example/tech",
+            evidence_text="Uses legacy dispatch routing spreadsheets",
+            confidence=0.9
+        )
+
+        self.company_unqualified = LeadCompany.objects.create(
+            campaign=self.campaign,
+            name="Unqualified Logistics",
+            website="https://unqualifiedlogistics.example",
+            enrichment_status="COMPLETED"
+        )
+        self.insight_unqualified = CampaignLeadInsight.objects.create(
+            company=self.company_unqualified,
+            campaign=self.campaign,
+            qualification_status="COMPLETED",
+            buying_group_status="NOT_STARTED"
+        )
+
+    # 1. GET context when buying group is complete
+    def test_get_sales_guidance_context_valid_lead(self):
+        url = reverse("lead-sales-guidance-context", kwargs={"pk": self.company.id})
+        res = self.client.get(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["lead_id"], str(self.company.id))
+        self.assertEqual(res.data["company_name"], "Leeds Express Freight")
+        self.assertEqual(res.data["campaign_id"], str(self.campaign.id))
+        self.assertEqual(res.data["buying_group_status"], "COMPLETED")
+        self.assertEqual(res.data["sales_guidance_status"], "NOT_STARTED")
+        self.assertTrue(res.data["can_run"])
+        self.assertIsNone(res.data["reason"])
+        self.assertEqual(res.data["prompt_context"]["contact_name"], "Sarah Jenkins")
+        self.assertEqual(res.data["prompt_context"]["evidence_count"], 1)
+
+    # 2. GET context when buying group is incomplete
+    def test_get_sales_guidance_context_buying_group_not_ready(self):
+        url = reverse("lead-sales-guidance-context", kwargs={"pk": self.company_unqualified.id})
+        res = self.client.get(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(res.data["can_run"])
+        self.assertEqual(res.data["reason"], "Buying group analysis must be completed before generating sales guidance.")
+
+    # 3. GET context for nonexistent lead
+    def test_get_sales_guidance_context_nonexistent_lead(self):
+        url = reverse("lead-sales-guidance-context", kwargs={"pk": uuid.uuid4()})
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    # 4. POST sales guidance with valid prerequisites
+    @patch("prospecting.tasks.generate_sales_guidance_async.delay")
+    def test_post_sales_guidance_valid_lead(self, mock_delay):
+        url = reverse("lead-sales-guidance", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["sales_guidance_status"], "QUEUED")
+        self.insight.refresh_from_db()
+        self.assertEqual(self.insight.sales_guidance_status, "QUEUED")
+        mock_delay.assert_called_once_with(
+            str(self.company.id),
+            str(self.campaign.id),
+            person_id=None,
+            tone="professional",
+            objective="book_meeting"
+        )
+
+    # 5. POST when buying group is not completed (prerequisite check)
+    def test_post_sales_guidance_buying_group_not_ready(self):
+        for invalid_status in ["NOT_STARTED", "QUEUED", "RUNNING", "FAILED"]:
+            self.insight_unqualified.buying_group_status = invalid_status
+            self.insight_unqualified.save()
+
+            url = reverse("lead-sales-guidance", kwargs={"pk": self.company_unqualified.id})
+            res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(res.data["error"], "BUYING_GROUP_NOT_READY")
+
+    # 6. POST when sales guidance is already QUEUED or RUNNING (conflict check)
+    @patch("prospecting.tasks.generate_sales_guidance_async.delay")
+    def test_post_sales_guidance_already_queued_or_running(self, mock_delay):
+        self.insight.sales_guidance_status = 'QUEUED'
+        self.insight.save()
+
+        url = reverse("lead-sales-guidance", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data["error"], "SALES_GUIDANCE_ALREADY_IN_PROGRESS")
+        mock_delay.assert_not_called()
+
+        self.insight.sales_guidance_status = 'RUNNING'
+        self.insight.save()
+        res2 = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res2.status_code, status.HTTP_409_CONFLICT)
+        mock_delay.assert_not_called()
+
+    # 7. Successful Celery execution
+    @patch("llm.router.IntelligentRouter.generate")
+    def test_generate_sales_guidance_async_success(self, mock_generate):
+        from prospecting.tasks import generate_sales_guidance_async
+        mock_generate.return_value = {
+            "type": "text",
+            "text": (
+                '{"talking_points": ["Cut dispatch scheduling time by 50%"],'
+                ' "recommended_angle": "Focus on replacing spreadsheet routing",'
+                ' "recommended_next_step": "Offer a 15-minute workflow audit",'
+                ' "message_draft": "Hi Sarah, saw you handle fleet logistics at Leeds Express Freight...",'
+                ' "risks": ["Driver pushback on app adoption"],'
+                ' "unknowns": ["Current TMS contract length"]}'
+            )
+        }
+
+        result = generate_sales_guidance_async(
+            str(self.company.id),
+            str(self.campaign.id),
+            person_id=str(self.person.id),
+            tone="direct",
+            objective="demo"
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["sales_guidance_status"], "COMPLETED")
+
+        self.insight.refresh_from_db()
+        self.assertEqual(self.insight.sales_guidance_status, "COMPLETED")
+        self.assertEqual(self.insight.sales_guidance_error, {})
+
+        guidance = SalesGuidance.objects.filter(company=self.company, campaign=self.campaign).first()
+        self.assertIsNotNone(guidance)
+        self.assertEqual(guidance.recommended_angle, "Focus on replacing spreadsheet routing")
+        self.assertEqual(guidance.message_draft, "Hi Sarah, saw you handle fleet logistics at Leeds Express Freight...")
+
+    # 8. Failed Celery execution
+    @patch("llm.router.IntelligentRouter.generate")
+    def test_generate_sales_guidance_async_failure(self, mock_generate):
+        from prospecting.tasks import generate_sales_guidance_async
+        mock_generate.side_effect = Exception("LLM rate limit reached")
+
+        with self.assertRaises(Exception):
+            generate_sales_guidance_async(str(self.company.id), str(self.campaign.id))
+
+        self.insight.refresh_from_db()
+        self.assertEqual(self.insight.sales_guidance_status, "FAILED")
+        self.assertEqual(self.insight.sales_guidance_error["error"], "LLM rate limit reached")
+
+    # 9. FAILED status can be retried
+    @patch("prospecting.tasks.generate_sales_guidance_async.delay")
+    def test_failed_sales_guidance_can_be_retried(self, mock_delay):
+        self.insight.sales_guidance_status = 'FAILED'
+        self.insight.sales_guidance_error = {"error": "Previous crash"}
+        self.insight.save()
+
+        url = reverse("lead-sales-guidance", kwargs={"pk": self.company.id})
+        res = self.client.post(url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["sales_guidance_status"], "QUEUED")
+        self.insight.refresh_from_db()
+        self.assertEqual(self.insight.sales_guidance_status, "QUEUED")
+        mock_delay.assert_called_once()
+
+    # 10. Campaign isolation
+    def test_campaign_isolation_for_sales_guidance_state(self):
+        insight_other = CampaignLeadInsight.objects.create(
+            company=self.company,
+            campaign=self.campaign_other,
+            qualification_status="COMPLETED",
+            buying_group_status="NOT_STARTED",
+            sales_guidance_status="NOT_STARTED"
+        )
+
+        url = reverse("lead-sales-guidance-context", kwargs={"pk": self.company.id})
+        res_primary = self.client.get(url, {"campaign_id": str(self.campaign.id)})
+        self.assertTrue(res_primary.data["can_run"])
+
+        res_other = self.client.get(url, {"campaign_id": str(self.campaign_other.id)})
+        self.assertFalse(res_other.data["can_run"])
+        self.assertEqual(res_other.data["reason"], "Buying group analysis must be completed before generating sales guidance.")
+
+    # 11. No automatic cascade test
+    @patch("prospecting.tasks.generate_sales_guidance_async.delay")
+    @patch("prospecting.tasks.identify_buying_group_async.delay")
+    @patch("prospecting.tasks.qualify_lead_async.delay")
+    @patch("prospecting.tasks.enrich_lead_contacts_async.delay")
+    def test_no_automatic_cascade_to_sales_guidance(self, mock_enrich, mock_qualify, mock_bg, mock_sg):
+        # 1. Triggering Contact Enrichment only dispatches enrich task, never sales guidance
+        enrich_url = reverse("lead-enrich", kwargs={"pk": self.company.id})
+        res_enrich = self.client.post(enrich_url)
+        self.assertEqual(res_enrich.status_code, status.HTTP_202_ACCEPTED)
+        mock_enrich.assert_called_once()
+        mock_sg.assert_not_called()
+
+        # 2. Reset enrichment status to COMPLETED for qualify test
+        self.company.enrichment_status = 'COMPLETED'
+        self.company.save(update_fields=['enrichment_status'])
+
+        # Triggering Lead Qualification only dispatches qualify task, never sales guidance
+        qual_url = reverse("lead-qualify", kwargs={"pk": self.company.id})
+        res_qual = self.client.post(qual_url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res_qual.status_code, status.HTTP_202_ACCEPTED)
+        mock_qualify.assert_called_once()
+        mock_sg.assert_not_called()
+
+        # 3. Ensure qualification status is COMPLETED for buying group test
+        self.insight.qualification_status = 'COMPLETED'
+        self.insight.save(update_fields=['qualification_status'])
+
+        # Triggering Buying Group only dispatches buying group task, never sales guidance
+        bg_url = reverse("lead-buying-group", kwargs={"pk": self.company.id})
+        res_bg = self.client.post(bg_url, {"campaign_id": str(self.campaign.id)})
+        self.assertEqual(res_bg.status_code, status.HTTP_202_ACCEPTED)
+        mock_bg.assert_called_once()
+        mock_sg.assert_not_called()
+
+
+class DiscoverMoreLeadsAPITestCase(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.user = get_default_user()
+        self.workspace = get_default_workspace()
+        self.other_workspace = Workspace.objects.create(name="Other Workspace")
+
+        self.req = ProspectingRequest.objects.create(
+            user_profile=self.user,
+            raw_objective="Find logistics companies in Leeds",
+            raw_target="Logistics and freight companies",
+            status="CONFIRMED"
+        )
+        self.spec_version = ProspectingSpecificationVersion.objects.create(
+            request=self.req,
+            version=1,
+            status="CONFIRMED",
+            specification_json={
+                "objective": {"value": "Find logistics companies", "provenance": "EXPLICIT_USER"},
+                "target": {
+                    "description": {"value": "Freight & transport", "provenance": "EXPLICIT_USER"},
+                    "categories": {"value": ["Freight Forwarding", "Courier Delivery"], "provenance": "EXPLICIT_USER"}
+                },
+                "geography": {
+                    "cities": {"value": ["Leeds"], "provenance": "EXPLICIT_USER"},
+                    "countries": {"value": ["UK"], "provenance": "EXPLICIT_USER"}
+                }
+            }
+        )
+        self.campaign = ProspectingCampaign.objects.create(
+            workspace=self.workspace,
+            name="Leeds Logistics Campaign",
+            product_description="Fleet routing SaaS",
+            problem_statement="High fuel costs",
+            geography={"location": "Leeds, UK"},
+            status="ACTIVE",
+            created_by=self.user,
+            prospecting_request=self.req
+        )
+        self.initial_run = DiscoveryRun.objects.create(
+            user_profile=self.user,
+            campaign=self.campaign,
+            prospecting_request=self.req,
+            specification_version=self.spec_version,
+            keyword="Freight Forwarding",
+            location="Leeds, UK",
+            status="completed",
+            total_leads_found=2
+        )
+        # Initial campaign lead
+        self.existing_company = LeadCompany.objects.create(
+            discovery_run=self.initial_run,
+            campaign=self.campaign,
+            name="Alpha Logistics Ltd",
+            website="https://alphalogistics.example",
+            phone="0113111222",
+            address="10 Briggate, Leeds",
+            category="Freight",
+            enrichment_status="NOT_STARTED"
+        )
+        DiscoveryLead.objects.create(discovery_run=self.initial_run, company=self.existing_company)
+
+    # 1. Valid discover-more request
+    @patch("prospecting.tasks.discover_more_leads_async.delay")
+    def test_discover_more_valid_request(self, mock_delay):
+        url = reverse("prospecting-campaign-discover-more", kwargs={"pk": self.campaign.id})
+        res = self.client.post(url, {"limit": 10})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["status"], "queued")
+        self.assertEqual(res.data["requested_limit"], 10)
+        self.assertEqual(res.data["campaign_id"], str(self.campaign.id))
+        self.assertTrue("run_id" in res.data)
+
+        run = DiscoveryRun.objects.get(id=res.data["run_id"])
+        self.assertEqual(run.campaign, self.campaign)
+        self.assertEqual(run.status, "queued")
+        mock_delay.assert_called_once_with(str(run.id), batch_size=10)
+
+    # 2. Default batch size when limit is omitted
+    @patch("prospecting.tasks.discover_more_leads_async.delay")
+    def test_discover_more_default_batch_size(self, mock_delay):
+        url = reverse("prospecting-campaign-discover-more", kwargs={"pk": self.campaign.id})
+        res = self.client.post(url, {})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["requested_limit"], 10)
+        mock_delay.assert_called_once()
+
+    # 3. Custom batch size
+    @patch("prospecting.tasks.discover_more_leads_async.delay")
+    def test_discover_more_custom_batch_size(self, mock_delay):
+        url = reverse("prospecting-campaign-discover-more", kwargs={"pk": self.campaign.id})
+        res = self.client.post(url, {"limit": 5})
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(res.data["requested_limit"], 5)
+        run_id = res.data["run_id"]
+        mock_delay.assert_called_once_with(run_id, batch_size=5)
+
+    # 4. Campaign authorization (wrong workspace)
+    def test_discover_more_campaign_authorization(self):
+        other_campaign = ProspectingCampaign.objects.create(
+            workspace=self.other_workspace,
+            name="Other Workspace Campaign",
+            product_description="Something",
+            problem_statement="Something",
+            created_by=self.user
+        )
+        url = reverse("prospecting-campaign-discover-more", kwargs={"pk": other_campaign.id})
+        res = self.client.post(url, {"limit": 10})
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(res.data["error"], "CAMPAIGN_NOT_FOUND")
+
+    # 5. Missing campaign
+    def test_discover_more_missing_campaign(self):
+        url = reverse("prospecting-campaign-discover-more", kwargs={"pk": uuid.uuid4()})
+        res = self.client.post(url, {"limit": 10})
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(res.data["error"], "CAMPAIGN_NOT_FOUND")
+
+    # 6. Missing specification
+    def test_discover_more_missing_specification(self):
+        empty_req_campaign = ProspectingCampaign.objects.create(
+            workspace=self.workspace,
+            name="Empty Spec Campaign",
+            product_description="",
+            problem_statement="",
+            created_by=self.user,
+            prospecting_request=None
+        )
+        url = reverse("prospecting-campaign-discover-more", kwargs={"pk": empty_req_campaign.id})
+        res = self.client.post(url, {"limit": 10})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["error"], "SPECIFICATION_NOT_READY")
+
+    # 7. Invalid batch size
+    def test_discover_more_invalid_batch_size(self):
+        url = reverse("prospecting-campaign-discover-more", kwargs={"pk": self.campaign.id})
+        res1 = self.client.post(url, {"limit": 0})
+        self.assertEqual(res1.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res1.data["error"], "INVALID_BATCH_SIZE")
+
+        res2 = self.client.post(url, {"limit": -10})
+        self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res2.data["error"], "INVALID_BATCH_SIZE")
+
+        res3 = self.client.post(url, {"limit": "invalid"})
+        self.assertEqual(res3.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res3.data["error"], "INVALID_BATCH_SIZE")
+
+    # 8. Deduplicates existing campaign leads
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    def test_discover_more_deduplicates_existing_campaign_leads(self, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        # Mock tool returning the existing lead + 2 new leads
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": "Alpha Logistics Ltd", "website": "https://alphalogistics.example", "phone": "0113111222"},
+                    {"name": "Beta Haulage", "website": "https://betahaulage.example", "phone": "0113222333"},
+                    {"name": "Gamma Express", "website": "https://gammaexpress.example", "phone": "0113333444"}
+                ]
+            }
+        )
+
+        result = DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["leads_created"], 2)  # Alpha Logistics was skipped!
+
+        company_names = list(LeadCompany.objects.filter(campaign=self.campaign).values_list('name', flat=True))
+        self.assertIn("Beta Haulage", company_names)
+        self.assertIn("Gamma Express", company_names)
+        self.assertEqual(company_names.count("Alpha Logistics Ltd"), 1)
+
+    # 9. Does not create duplicate DiscoveryLead records
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    def test_discover_more_does_not_create_duplicate_discovery_leads(self, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": "Delta Transit", "website": "https://deltatransit.example", "phone": "0113444555"}
+                ]
+            }
+        )
+
+        result = DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        run_id = result["run_id"]
+        lead = LeadCompany.objects.get(name="Delta Transit")
+        dl_count = DiscoveryLead.objects.filter(discovery_run_id=run_id, company=lead).count()
+        self.assertEqual(dl_count, 1)
+
+    # 10. Respects batch limit
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    def test_discover_more_respects_batch_limit(self, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": f"Company {i}", "website": f"https://company{i}.example", "phone": f"0113000{i}"}
+                    for i in range(10)
+                ]
+            }
+        )
+
+        result = DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=3)
+        self.assertEqual(result["leads_created"], 3)
+        self.assertEqual(result["requested_limit"], 3)
+        self.assertFalse(result["exhausted"])
+
+    # 11. Returns fewer when search space is exhausted
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    def test_discover_more_returns_fewer_when_search_space_exhausted(self, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": "Epsilon Movers", "website": "https://epsilonmovers.example", "phone": "0113999888"}
+                ]
+            }
+        )
+
+        result = DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=5)
+        self.assertEqual(result["leads_created"], 1)
+        self.assertEqual(result["requested_limit"], 5)
+        self.assertTrue(result["exhausted"])
+
+    # 12. Records exhaustion
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    def test_discover_more_records_exhaustion(self, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(success=True, tool_name="search_companies", data={"companies": []})
+
+        result = DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        self.assertEqual(result["leads_created"], 0)
+        self.assertTrue(result["exhausted"])
+
+    # 13. Tracks discovery run lifecycle
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    def test_discover_more_tracks_discovery_run(self, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": "Zeta Cargo", "website": "https://zetacargo.example", "phone": "0113777666"}
+                ]
+            }
+        )
+
+        run = DiscoveryRun.objects.create(
+            user_profile=self.user,
+            campaign=self.campaign,
+            keyword="Courier",
+            location="Leeds, UK",
+            status="running"
+        )
+        result = DiscoveryBatchService.generate_batch(
+            campaign=self.campaign,
+            batch_size=10,
+            discovery_run=run
+        )
+        run.refresh_from_db()
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(run.total_leads_found, 1)
+        self.assertIsNotNone(run.completed_at)
+
+    # 14. Prevents concurrent runs
+    def test_discover_more_prevents_concurrent_runs(self):
+        # Create an active running run
+        DiscoveryRun.objects.create(
+            user_profile=self.user,
+            campaign=self.campaign,
+            keyword="Active Search",
+            location="Leeds",
+            status="running"
+        )
+        url = reverse("prospecting-campaign-discover-more", kwargs={"pk": self.campaign.id})
+        res = self.client.post(url, {"limit": 10})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data["error"], "DISCOVERY_ALREADY_RUNNING")
+
+    # 15. Does NOT trigger contact enrichment
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.enrich_lead_contacts_async.delay")
+    def test_discover_more_does_not_trigger_contact_enrichment(self, mock_enrich, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": "Eta Transport", "website": "https://etatransport.example", "phone": "0113555444"}
+                ]
+            }
+        )
+
+        DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        lead = LeadCompany.objects.get(name="Eta Transport")
+        self.assertEqual(lead.enrichment_status, "NOT_STARTED")
+        mock_enrich.assert_not_called()
+
+    # 16. Does NOT trigger qualification
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.qualify_lead_async.delay")
+    def test_discover_more_does_not_trigger_qualification(self, mock_qualify, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": "Theta Freight", "website": "https://thetafreight.example", "phone": "0113666555"}
+                ]
+            }
+        )
+
+        DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        lead = LeadCompany.objects.get(name="Theta Freight")
+        insight = CampaignLeadInsight.objects.get(company=lead, campaign=self.campaign)
+        self.assertEqual(insight.qualification_status, "NOT_STARTED")
+        mock_qualify.assert_not_called()
+
+    # 17. Does NOT trigger buying group
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.identify_buying_group_async.delay")
+    def test_discover_more_does_not_trigger_buying_group(self, mock_bg, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": "Iota Logistics", "website": "https://iotalogistics.example", "phone": "0113888777"}
+                ]
+            }
+        )
+
+        DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        lead = LeadCompany.objects.get(name="Iota Logistics")
+        insight = CampaignLeadInsight.objects.get(company=lead, campaign=self.campaign)
+        self.assertEqual(insight.buying_group_status, "NOT_STARTED")
+        mock_bg.assert_not_called()
+
+    # 18. Does NOT trigger sales guidance
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    @patch("prospecting.tasks.generate_sales_guidance_async.delay")
+    def test_discover_more_does_not_trigger_sales_guidance(self, mock_sg, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult
+
+        mock_exec.return_value = ToolResult(
+            success=True,
+            tool_name="search_companies",
+            data={
+                "companies": [
+                    {"name": "Kappa Delivery", "website": "https://kappadelivery.example", "phone": "0113222111"}
+                ]
+            }
+        )
+
+        DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        lead = LeadCompany.objects.get(name="Kappa Delivery")
+        insight = CampaignLeadInsight.objects.get(company=lead, campaign=self.campaign)
+        self.assertEqual(insight.sales_guidance_status, "NOT_STARTED")
+        mock_sg.assert_not_called()
+
+    # 19. Provider failure is handled gracefully
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    def test_discover_more_provider_failure(self, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult, ToolError
+
+        # First call fails, second call succeeds
+        mock_exec.side_effect = [
+            ToolResult(success=False, tool_name="search_companies", data={}, error=ToolError(code="API_ERROR", message="API limit exceeded", retryable=False)),
+            ToolResult(success=True, tool_name="search_companies", data={"companies": [{"name": "Lambda Cargo", "website": "https://lambda.example"}]}),
+            ToolResult(success=True, tool_name="search_companies", data={"results": []})
+        ]
+
+        result = DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["leads_created"], 1)
+
+    # 20. Partial success across providers
+    @patch("llm.tools.executor.ToolExecutor.execute")
+    def test_discover_more_partial_success(self, mock_exec):
+        from prospecting.discovery.service import DiscoveryBatchService
+        from llm.tools.result import ToolResult, ToolError
+
+        mock_exec.side_effect = [
+            ToolResult(success=True, tool_name="search_companies", data={"companies": [{"name": "Mu Express", "website": "https://muexpress.example"}]}),
+            ToolResult(success=False, tool_name="search_companies", data={}, error=ToolError(code="PROVIDER_DOWN", message="Provider down", retryable=False)),
+            ToolResult(success=True, tool_name="search_companies", data={"results": [{"title": "Nu Logistics", "url": "https://nulogistics.example"}]})
+        ]
+
+        result = DiscoveryBatchService.generate_batch(campaign=self.campaign, batch_size=10)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["leads_created"], 2)
+
+
+
+
+
+
 
 
 

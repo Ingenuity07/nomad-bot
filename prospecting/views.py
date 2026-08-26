@@ -13,7 +13,7 @@ from knowledge_base.models import UserProfile
 from prospecting.models import (
     DiscoveryRun, LeadCompany, LeadContact, WebsiteAnalysis, ProblemSignal, ResearchRun,
     Evidence, CompanySignal, Person, ContactPoint, BuyingGroupMember,
-    TargetList, ListMembership, CampaignEnrollment, SalesGuidance, ProspectingCampaign,
+    TargetList, ListMembership, CampaignEnrollment, SalesGuidance, ProspectingCampaign, CampaignLeadInsight,
     EmailSequence, EmailMessage, EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback,
     get_default_workspace, CRMIntegrationRecord
 )
@@ -320,6 +320,116 @@ class ProspectingCampaignLeadsAPIView(ProspectingLeadsAPIView):
         return super().get(request)
 
 
+class ProspectingCampaignDiscoverMoreAPIView(APIView):
+    """
+    Triggers batch lead expansion ("Generate More Leads") for an existing ProspectingCampaign.
+    Loads the campaign's confirmed specification, executes candidate discovery,
+    and deduplicates candidates against all leads already in the campaign.
+    """
+
+    def post(self, request, pk):
+        from django.core.cache import cache
+        from django.conf import settings
+        workspace = get_default_workspace()
+
+        try:
+            campaign = ProspectingCampaign.objects.get(id=pk, workspace=workspace)
+        except ProspectingCampaign.DoesNotExist:
+            return Response({
+                "error": "CAMPAIGN_NOT_FOUND",
+                "message": "Campaign not found."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # 1. Validate Specification is ready
+        spec_version = None
+        if campaign.prospecting_request:
+            spec_version = campaign.prospecting_request.spec_versions.filter(
+                status='CONFIRMED'
+            ).last() or campaign.prospecting_request.spec_versions.last()
+
+        if not spec_version and not campaign.product_description and not campaign.description:
+            return Response({
+                "error": "SPECIFICATION_NOT_READY",
+                "message": "Campaign specification is not ready for discovery."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. Validate batch limit
+        raw_limit = request.data.get("limit") or request.query_params.get("limit") or getattr(settings, "PROSPECTING_MAX_LEADS_PER_RUN", 10)
+        try:
+            limit = int(raw_limit)
+            if limit <= 0 or limit > 100:
+                raise ValueError()
+        except (TypeError, ValueError):
+            return Response({
+                "error": "INVALID_BATCH_SIZE",
+                "message": "Limit must be a positive integer between 1 and 100."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 3. Concurrency check: prevent overlapping active discovery runs for this campaign
+        is_already_running = DiscoveryRun.objects.filter(
+            campaign=campaign,
+            status__in=['pending', 'running', 'queued']
+        ).exists()
+
+        lock_key = f"lock:discover_more:{campaign.id}"
+        is_locked = bool(cache.get(lock_key))
+
+        if is_already_running or is_locked:
+            return Response({
+                "error": "DISCOVERY_ALREADY_RUNNING",
+                "message": "Discovery is already running for this campaign."
+            }, status=status.HTTP_409_CONFLICT)
+
+        # 4. Resolve keyword and location for DiscoveryRun record
+        keyword = "Business"
+        location = "UK"
+        if spec_version and spec_version.specification_json:
+            try:
+                from prospecting.intent.schemas import ProspectingSpecification
+                spec = ProspectingSpecification.model_validate(spec_version.specification_json)
+                if spec.target and spec.target.categories.value:
+                    keyword = spec.target.categories.value[0]
+                elif spec.target and spec.target.industries.value:
+                    keyword = spec.target.industries.value[0]
+                if spec.geography and spec.geography.cities.value:
+                    location = ", ".join(spec.geography.cities.value)
+                elif spec.geography and spec.geography.countries.value:
+                    location = ", ".join(spec.geography.countries.value)
+            except Exception:
+                pass
+
+        if keyword == "Business" and campaign.name:
+            keyword = campaign.name
+        if location == "UK" and campaign.geography:
+            location = campaign.geography.get("location") or campaign.geography.get("country") or "UK"
+
+        # 5. Create DiscoveryRun record
+        run = DiscoveryRun.objects.create(
+            user_profile=campaign.created_by or get_default_user(),
+            campaign=campaign,
+            prospecting_request=campaign.prospecting_request,
+            specification_version=spec_version,
+            keyword=keyword,
+            location=location,
+            status='queued',
+            total_leads_found=0
+        )
+
+        # 6. Dispatch async Celery task
+        from prospecting.tasks import discover_more_leads_async
+        discover_more_leads_async.delay(str(run.id), batch_size=limit)
+
+        logger.info(f"Dispatched discover-more task for Campaign ID: {campaign.id}, Run ID: {run.id}, Limit: {limit}")
+
+        return Response({
+            "status": "queued",
+            "run_id": str(run.id),
+            "campaign_id": str(campaign.id),
+            "requested_limit": limit,
+            "message": "Lead generation queued successfully."
+        }, status=status.HTTP_202_ACCEPTED)
+
+
 def _visible_discovery_runs():
     workspace = get_default_workspace()
     user = get_default_user()
@@ -617,12 +727,321 @@ class LeadContactsAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class LeadEnrichContextAPIView(APIView):
+    """Context preview API for contact enrichment."""
+    def get(self, request, pk):
+        try:
+            company = LeadCompany.objects.get(id=pk)
+        except LeadCompany.DoesNotExist:
+            return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        is_website_usable = bool(company.website and company.website.strip())
+        current_contact_count = company.contacts.count()
+        status_val = company.enrichment_status
+
+        can_enrich = True
+        reason = None
+
+        if not is_website_usable:
+            can_enrich = False
+            reason = "Lead company website is required for contact enrichment."
+        elif status_val in ['QUEUED', 'RUNNING']:
+            can_enrich = False
+            reason = f"Contact enrichment is currently {status_val.lower()}."
+
+        return Response({
+            "lead_id": str(company.id),
+            "company_name": company.name,
+            "website": company.website,
+            "is_website_usable": is_website_usable,
+            "current_contact_count": current_contact_count,
+            "enrichment_status": status_val,
+            "can_enrich": can_enrich,
+            "reason": reason,
+        }, status=status.HTTP_200_OK)
+
+
+class LeadEnrichAPIView(APIView):
+    """Triggers contact enrichment asynchronously for a lead company."""
+    def post(self, request, pk):
+        try:
+            company = LeadCompany.objects.get(id=pk)
+        except LeadCompany.DoesNotExist:
+            return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 1. Validate website presence
+        if not (company.website and company.website.strip()):
+            return Response({
+                "error": "INVALID_LEAD_WEBSITE",
+                "message": "Lead company website is required for contact enrichment."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. Check for active concurrent request (Idempotency)
+        if company.enrichment_status in ['QUEUED', 'RUNNING']:
+            return Response({
+                "error": "ENRICHMENT_ALREADY_IN_PROGRESS",
+                "message": f"Contact enrichment is already {company.enrichment_status.lower()} for this lead.",
+                "enrichment_status": company.enrichment_status
+            }, status=status.HTTP_409_CONFLICT)
+
+        # 3. Transition status to QUEUED
+        company.enrichment_status = 'QUEUED'
+        company.enrichment_error = {}
+        company.save(update_fields=['enrichment_status', 'enrichment_error'])
+
+        # 4. Dispatch Celery task asynchronously
+        from prospecting.tasks import enrich_lead_contacts_async
+        enrich_lead_contacts_async.delay(str(company.id))
+
+        logger.info(f"Dispatched contact enrichment task for LeadCompany ID: {company.id}")
+
+        return Response({
+            "message": "Contact enrichment task queued successfully.",
+            "lead_id": str(company.id),
+            "enrichment_status": "QUEUED"
+        }, status=status.HTTP_202_ACCEPTED)
+
+
+class LeadQualifyContextAPIView(APIView):
+    """Context preview API for lead qualification."""
+    def get(self, request, pk):
+        try:
+            company = LeadCompany.objects.get(id=pk)
+        except LeadCompany.DoesNotExist:
+            return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        campaign_id = request.query_params.get("campaign_id")
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
+
+        insight = None
+        if campaign:
+            insight = CampaignLeadInsight.objects.filter(company=company, campaign=campaign).first()
+
+        is_website_usable = bool(company.website and company.website.strip())
+        is_enrichment_completed = (company.enrichment_status == 'COMPLETED')
+        qual_status = insight.qualification_status if insight else 'NOT_STARTED'
+
+        can_qualify = True
+        reason = None
+
+        if not is_website_usable:
+            can_qualify = False
+            reason = "Lead company website is required for qualification."
+        elif not is_enrichment_completed:
+            can_qualify = False
+            reason = "Lead contact enrichment must be completed before qualification."
+        elif qual_status in ['QUEUED', 'RUNNING']:
+            can_qualify = False
+            reason = f"Lead qualification is currently {qual_status.lower()}."
+
+        return Response({
+            "lead_id": str(company.id),
+            "company_name": company.name,
+            "website": company.website,
+            "campaign_id": str(campaign.id) if campaign else None,
+            "campaign_name": campaign.name if campaign else None,
+            "qualification_criteria": {
+                "product_description": campaign.product_description if campaign else None,
+                "problem_statement": campaign.problem_statement if campaign else None,
+            },
+            "current_enrichment_status": company.enrichment_status,
+            "current_qualification_status": qual_status,
+            "can_qualify": can_qualify,
+            "reason": reason,
+        }, status=status.HTTP_200_OK)
+
+
+class LeadQualifyAPIView(APIView):
+    """Triggers lead qualification asynchronously for a company and campaign."""
+    def post(self, request, pk):
+        try:
+            company = LeadCompany.objects.get(id=pk)
+        except LeadCompany.DoesNotExist:
+            return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 1. Validate website presence
+        if not (company.website and company.website.strip()):
+            return Response({
+                "error": "INVALID_LEAD_WEBSITE",
+                "message": "Lead company website is required for qualification."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. Validate enrichment prerequisite
+        if company.enrichment_status != 'COMPLETED':
+            return Response({
+                "error": "ENRICHMENT_NOT_READY",
+                "message": "Lead contact enrichment must be completed before qualification."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        campaign_id = request.data.get("campaign_id") or request.query_params.get("campaign_id")
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
+
+        insight, _ = CampaignLeadInsight.objects.get_or_create(
+            company=company,
+            campaign=campaign
+        )
+
+        # 3. Check for active concurrent request (Idempotency)
+        if insight.qualification_status in ['QUEUED', 'RUNNING']:
+            return Response({
+                "error": "QUALIFICATION_ALREADY_IN_PROGRESS",
+                "message": f"Lead qualification is already {insight.qualification_status.lower()} for this lead.",
+                "qualification_status": insight.qualification_status
+            }, status=status.HTTP_409_CONFLICT)
+
+        # 4. Transition status to QUEUED
+        insight.qualification_status = 'QUEUED'
+        insight.qualification_error = {}
+        insight.save(update_fields=['qualification_status', 'qualification_error'])
+
+        # 5. Dispatch Celery task asynchronously
+        from prospecting.tasks import qualify_lead_async
+        qualify_lead_async.delay(str(company.id), str(campaign.id) if campaign else None)
+
+        logger.info(f"Dispatched lead qualification task for LeadCompany ID: {company.id}, Campaign ID: {campaign.id if campaign else None}")
+
+        return Response({
+            "message": "Lead qualification task queued successfully.",
+            "lead_id": str(company.id),
+            "campaign_id": str(campaign.id) if campaign else None,
+            "qualification_status": "QUEUED"
+        }, status=status.HTTP_202_ACCEPTED)
+
+
+class LeadBuyingGroupContextAPIView(APIView):
+    """Context preview API for buying group identification."""
+    def get(self, request, pk):
+        try:
+            company = LeadCompany.objects.get(id=pk)
+        except LeadCompany.DoesNotExist:
+            return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        campaign_id = request.query_params.get("campaign_id")
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
+
+        insight = None
+        if campaign:
+            insight = CampaignLeadInsight.objects.filter(company=company, campaign=campaign).first()
+
+        qual_status = insight.qualification_status if insight else 'NOT_STARTED'
+        bg_status = insight.buying_group_status if insight else 'NOT_STARTED'
+        is_qualification_completed = (qual_status == 'COMPLETED')
+
+        can_run = True
+        reason = None
+
+        if not is_qualification_completed:
+            can_run = False
+            reason = "Lead qualification must be completed before buying group identification."
+        elif bg_status in ['QUEUED', 'RUNNING']:
+            can_run = False
+            reason = f"Buying group analysis is currently {bg_status.lower()}."
+
+        members_count = BuyingGroupMember.objects.filter(company=company, campaign=campaign).count() if campaign else 0
+        contacts_count = company.contacts.count()
+
+        return Response({
+            "lead_id": str(company.id),
+            "company_name": company.name,
+            "website": company.website,
+            "campaign_id": str(campaign.id) if campaign else None,
+            "campaign_name": campaign.name if campaign else None,
+            "enrichment_status": company.enrichment_status,
+            "qualification_status": qual_status,
+            "buying_group_status": bg_status,
+            "qualification_context": {
+                "fit_score": float(insight.fit_score) if insight and insight.fit_score is not None else None,
+                "fit_level": insight.fit_level if insight else 'UNKNOWN',
+                "company_summary": insight.company_summary if insight else '',
+            },
+            "current_members_count": members_count,
+            "contacts_count": contacts_count,
+            "can_run": can_run,
+            "reason": reason,
+        }, status=status.HTTP_200_OK)
+
+
 class LeadBuyingGroupAPIView(APIView):
-    """Get list of buying group members for a lead."""
+    """Get list of buying group members or trigger buying group analysis for a lead."""
     def get(self, request, pk):
         members = BuyingGroupMember.objects.filter(company_id=pk)
         serializer = BuyingGroupMemberSerializer(members, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, pk):
+        try:
+            company = LeadCompany.objects.get(id=pk)
+        except LeadCompany.DoesNotExist:
+            return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        campaign_id = request.data.get("campaign_id") or request.query_params.get("campaign_id")
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
+
+        insight, _ = CampaignLeadInsight.objects.get_or_create(
+            company=company,
+            campaign=campaign
+        )
+
+        # 1. Prerequisite validation
+        if insight.qualification_status != 'COMPLETED':
+            return Response({
+                "error": "QUALIFICATION_NOT_READY",
+                "message": "Lead qualification must be completed before buying group identification."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. Check for active concurrent request (Idempotency)
+        if insight.buying_group_status in ['QUEUED', 'RUNNING']:
+            return Response({
+                "error": "BUYING_GROUP_ALREADY_IN_PROGRESS",
+                "message": f"Buying group analysis is already {insight.buying_group_status.lower()} for this lead.",
+                "buying_group_status": insight.buying_group_status
+            }, status=status.HTTP_409_CONFLICT)
+
+        # 3. Transition status to QUEUED
+        insight.buying_group_status = 'QUEUED'
+        insight.buying_group_error = {}
+        insight.save(update_fields=['buying_group_status', 'buying_group_error'])
+
+        # 4. Dispatch Celery task asynchronously
+        from prospecting.tasks import identify_buying_group_async
+        identify_buying_group_async.delay(str(company.id), str(campaign.id) if campaign else None)
+
+        logger.info(f"Dispatched buying group identification task for LeadCompany ID: {company.id}, Campaign ID: {campaign.id if campaign else None}")
+
+        return Response({
+            "message": "Buying group analysis task queued successfully.",
+            "lead_id": str(company.id),
+            "campaign_id": str(campaign.id) if campaign else None,
+            "buying_group_status": "QUEUED"
+        }, status=status.HTTP_202_ACCEPTED)
 
 
 def queue_lead_research(company, campaign=None, discovery_run=None):
@@ -1149,110 +1568,154 @@ class TargetListDetailAPIView(APIView):
             return Response({"error": "List or company not found"}, status=status.HTTP_404_NOT_FOUND)
 
 
+class LeadSalesGuidanceContextAPIView(APIView):
+    """Context preview API for sales outreach guidance generation."""
+    def get(self, request, pk):
+        try:
+            company = LeadCompany.objects.get(id=pk)
+        except LeadCompany.DoesNotExist:
+            return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        campaign_id = request.query_params.get("campaign_id")
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
+
+        person_id = request.query_params.get("person_id")
+        person = None
+        if person_id:
+            try:
+                person = Person.objects.get(id=person_id, company=company)
+            except Person.DoesNotExist:
+                person = None
+        if not person:
+            bg_member = company.buying_group_members.filter(campaign=campaign).first() if campaign else None
+            person = bg_member.person if bg_member else company.people.first()
+
+        insight = None
+        if campaign:
+            insight = CampaignLeadInsight.objects.filter(company=company, campaign=campaign).first()
+
+        qual_status = insight.qualification_status if insight else 'NOT_STARTED'
+        bg_status = insight.buying_group_status if insight else 'NOT_STARTED'
+        sg_status = insight.sales_guidance_status if insight else 'NOT_STARTED'
+        is_buying_group_completed = (bg_status == 'COMPLETED')
+
+        can_run = True
+        reason = None
+
+        if not is_buying_group_completed:
+            can_run = False
+            reason = "Buying group analysis must be completed before generating sales guidance."
+        elif sg_status in ['QUEUED', 'RUNNING']:
+            can_run = False
+            reason = f"Sales guidance generation is currently {sg_status.lower()}."
+
+        evidence = Evidence.objects.filter(company=company)
+        evidence_preview = [ev.evidence_text for ev in evidence[:5]]
+
+        tone = request.query_params.get("tone", "professional")
+        objective = request.query_params.get("objective", "book_meeting")
+
+        return Response({
+            "lead_id": str(company.id),
+            "company_name": company.name,
+            "website": company.website,
+            "campaign_id": str(campaign.id) if campaign else None,
+            "campaign_name": campaign.name if campaign else None,
+            "enrichment_status": company.enrichment_status,
+            "qualification_status": qual_status,
+            "buying_group_status": bg_status,
+            "sales_guidance_status": sg_status,
+            "prompt_context": {
+                "product_description": campaign.product_description if campaign else '',
+                "contact_name": person.name if person else 'Operations Manager',
+                "contact_title": person.title if person and person.title else 'Ops Manager',
+                "tone": tone,
+                "objective": objective,
+                "evidence_count": evidence.count(),
+                "evidence_preview": evidence_preview,
+            },
+            "can_run": can_run,
+            "reason": reason,
+        }, status=status.HTTP_200_OK)
+
+
 class LeadSalesGuidanceAPIView(APIView):
-    """Generates structured pitch talking points and outreach message drafts using LLM router."""
+    """Get guidance records or trigger asynchronous sales guidance generation."""
+    def get(self, request, pk):
+        guidance = SalesGuidance.objects.filter(company_id=pk)
+        serializer = SalesGuidanceSerializer(guidance, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
     def post(self, request, pk):
         try:
             company = LeadCompany.objects.get(id=pk)
-            campaign_id = request.data.get("campaign_id")
-            campaign = ProspectingCampaign.objects.get(id=campaign_id)
-            
-            person_id = request.data.get("person_id")
-            person = None
-            if person_id:
-                person = Person.objects.filter(id=person_id, company=company).first()
+        except LeadCompany.DoesNotExist:
+            return Response({"error": "Lead company not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            tone = request.data.get("tone", "professional")
-            objective = request.data.get("objective", "book_meeting")
+        campaign_id = request.data.get("campaign_id") or request.query_params.get("campaign_id")
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
 
-            # Collect evidence/signals context
-            evidence = Evidence.objects.filter(company=company)
-            evidence_text = "\n".join([f"- {ev.evidence_text} (Source: {ev.source_url})" for ev in evidence[:5]])
+        insight, _ = CampaignLeadInsight.objects.get_or_create(
+            company=company,
+            campaign=campaign
+        )
 
-            prompt = (
-                f"Create sales outreach guidance for target account '{company.name}' "
-                f"in campaign '{campaign.name}'. Product values: '{campaign.product_description}'.\n"
-                f"Contact person: {person.name if person else 'Operations Manager'} (Title: {person.title if person else 'Ops Manager'}).\n"
-                f"Tone: {tone}. Outreach objective: {objective}.\n"
-                f"Observed account evidence:\n{evidence_text}\n"
-            )
+        # 1. Prerequisite validation
+        if insight.buying_group_status != 'COMPLETED':
+            return Response({
+                "error": "BUYING_GROUP_NOT_READY",
+                "message": "Buying group analysis must be completed before generating sales guidance."
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-            schema = (
-                "{"
-                '  "talking_points": ["string (value statement mapped to evidence)"],'
-                '  "recommended_angle": "string (value hook)",'
-                '  "recommended_next_step": "string (next CTA)",'
-                '  "message_draft": "string (email pitch copy)",'
-                '  "risks": ["string"],'
-                '  "unknowns": ["string"]'
-                "}"
-            )
+        # 2. Check for active concurrent request (Idempotency)
+        if insight.sales_guidance_status in ['QUEUED', 'RUNNING']:
+            return Response({
+                "error": "SALES_GUIDANCE_ALREADY_IN_PROGRESS",
+                "message": f"Sales guidance generation is already {insight.sales_guidance_status.lower()} for this lead.",
+                "sales_guidance_status": insight.sales_guidance_status
+            }, status=status.HTTP_409_CONFLICT)
 
-            system_prompt = "You are a senior AI sales development and copywriting strategist. Return ONLY raw JSON."
-            full_prompt = f"{prompt}\n\nSchema:\n{schema}\n\nReturn ONLY raw JSON."
-            
-            import json
-            from llm.context import LLMRequestContext
-            with LLMRequestContext(
-                correlation_id=f"lead_guidance:{pk}",
-                operation="prospecting.lead_guidance",
-                metadata={
-                    "company_id": str(company.id),
-                    "company_name": company.name,
-                    "campaign_id": str(campaign.id),
-                    "person_id": str(person.id) if person else "",
-                }
-            ):
-                result = router.generate(
-                    prompt=full_prompt,
-                    system_prompt=system_prompt,
-                    prompt_key="prospecting.lead_guidance.user",
-                    system_prompt_key="prospecting.lead_guidance.system",
-                    template_variables={
-                        "company_name": company.name,
-                        "campaign_name": campaign.name,
-                        "product_description": campaign.product_description,
-                        "contact_name": person.name if person else 'Operations Manager',
-                        "contact_title": person.title if person else 'Ops Manager',
-                        "tone": tone,
-                        "objective": objective,
-                        "evidence": evidence_text
-                    }
-                )
-            text = result.get("text", "").strip()
+        person_id = request.data.get("person_id") or request.query_params.get("person_id")
+        tone = request.data.get("tone", "professional")
+        objective = request.data.get("objective", "book_meeting")
 
-            if text.startswith("```json"):
-                text = text[7:]
-            elif text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
+        # 3. Transition status to QUEUED
+        insight.sales_guidance_status = 'QUEUED'
+        insight.sales_guidance_error = {}
+        insight.save(update_fields=['sales_guidance_status', 'sales_guidance_error'])
 
-            data = json.loads(text)
-            
-            # Save SalesGuidance
-            guidance = SalesGuidance.objects.create(
-                company=company,
-                campaign=campaign,
-                person=person,
-                talking_points=data.get("talking_points", []),
-                recommended_angle=data.get("recommended_angle", "Direct Pitch"),
-                recommended_next_step=data.get("recommended_next_step", "Email pitch"),
-                message_draft=data.get("message_draft", ""),
-                risks=data.get("risks", []),
-                unknowns=data.get("unknowns", []),
-                metadata={"tone": tone, "objective": objective}
-            )
+        # 4. Dispatch Celery task asynchronously
+        from prospecting.tasks import generate_sales_guidance_async
+        generate_sales_guidance_async.delay(
+            str(company.id),
+            str(campaign.id) if campaign else None,
+            person_id=str(person_id) if person_id else None,
+            tone=tone,
+            objective=objective
+        )
 
-            serializer = SalesGuidanceSerializer(guidance)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        logger.info(f"Dispatched sales guidance generation task for LeadCompany ID: {company.id}, Campaign ID: {campaign.id if campaign else None}")
 
-        except (LeadCompany.DoesNotExist, ProspectingCampaign.DoesNotExist) as e:
-            return Response({"error": str(e)}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            logger.error(f"Error generating sales guidance: {e}")
-            return Response({"error": "Failed to generate sales guidance"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({
+            "message": "Sales guidance generation task queued successfully.",
+            "lead_id": str(company.id),
+            "campaign_id": str(campaign.id) if campaign else None,
+            "sales_guidance_status": "QUEUED"
+        }, status=status.HTTP_202_ACCEPTED)
 
 
 class CampaignEnrollmentAPIView(APIView):
