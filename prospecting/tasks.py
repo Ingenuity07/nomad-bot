@@ -803,3 +803,443 @@ def parse_intent_async(request_id: str):
             pass
         raise e
 
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 3},
+    retry_backoff=True,
+    time_limit=300
+)
+def enrich_lead_contacts_async(lead_id: str):
+    """
+    Celery task to asynchronously extract contacts for a LeadCompany.
+    Transitions LeadCompany.enrichment_status: QUEUED -> RUNNING -> COMPLETED (or FAILED).
+    Uses a Redis lock to prevent duplicate concurrent runs.
+    """
+    lock_key = f"lock:enrich_lead_contacts:{lead_id}"
+    lock_acquired = cache.add(lock_key, "locked", timeout=600)
+
+    if not lock_acquired:
+        logger.warning(f"Task lock already held for key {lock_key}. Skipping execution.")
+        return {"status": "Skipped", "reason": "Enrichment task lock already held."}
+
+    logger.info(f"Starting contact enrichment for LeadCompany ID: {lead_id}")
+
+    try:
+        from prospecting.models import LeadCompany
+        company = LeadCompany.objects.get(id=lead_id)
+    except LeadCompany.DoesNotExist:
+        cache.delete(lock_key)
+        logger.error(f"LeadCompany {lead_id} not found for enrichment.")
+        return {"status": "Failed", "reason": f"LeadCompany {lead_id} not found."}
+
+    try:
+        # Transition state: RUNNING
+        company.enrichment_status = 'RUNNING'
+        company.save(update_fields=['enrichment_status'])
+
+        # Execute contact extraction
+        discovered_contacts = ContactExtractor.extract_contacts(company)
+        
+        # Transition state: COMPLETED
+        company.enrichment_status = 'COMPLETED'
+        company.enrichment_error = {}
+        company.save(update_fields=['enrichment_status', 'enrichment_error'])
+
+        logger.info(f"Successfully enriched {len(discovered_contacts)} contacts for company '{company.name}' ({company.id}).")
+        return {
+            "status": "success",
+            "lead_id": str(company.id),
+            "company_name": company.name,
+            "contacts_count": len(discovered_contacts),
+        }
+    except Exception as e:
+        logger.exception(f"Contact enrichment failed for LeadCompany ID {lead_id}: {e}")
+        company.enrichment_status = 'FAILED'
+        company.enrichment_error = {
+            "error": str(e),
+            "exception_type": type(e).__name__,
+        }
+        company.save(update_fields=['enrichment_status', 'enrichment_error'])
+        raise e
+    finally:
+        cache.delete(lock_key)
+        logger.debug(f"Lock released for task: {lock_key}")
+
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 3},
+    retry_backoff=True,
+    time_limit=300
+)
+def qualify_lead_async(lead_id: str, campaign_id: str = None):
+    """
+    Celery task to asynchronously analyze and qualify a LeadCompany for a ProspectingCampaign.
+    Transitions CampaignLeadInsight.qualification_status: QUEUED -> RUNNING -> COMPLETED (or FAILED).
+    Uses a Redis lock per lead and campaign to prevent concurrent duplicate jobs.
+    """
+    lock_key = f"lock:qualify_lead:{lead_id}:{campaign_id or 'default'}"
+    lock_acquired = cache.add(lock_key, "locked", timeout=600)
+
+    if not lock_acquired:
+        logger.warning(f"Task lock already held for key {lock_key}. Skipping execution.")
+        return {"status": "Skipped", "reason": "Qualification task lock already held."}
+
+    logger.info(f"Starting lead qualification for LeadCompany ID: {lead_id}, Campaign ID: {campaign_id}")
+
+    insight = None
+    try:
+        from prospecting.models import LeadCompany, ProspectingCampaign, CampaignLeadInsight
+        from prospecting.analyzer import WebsiteAnalyzer
+
+        company = LeadCompany.objects.get(id=lead_id)
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
+
+        insight, _ = CampaignLeadInsight.objects.get_or_create(
+            company=company,
+            campaign=campaign,
+            defaults={'qualification_status': 'QUEUED'}
+        )
+
+        insight.qualification_status = 'RUNNING'
+        insight.save(update_fields=['qualification_status'])
+
+        analyzer = WebsiteAnalyzer()
+        analysis = analyzer.analyze_website(company, campaign=campaign)
+
+        insight.refresh_from_db()
+        insight.qualification_status = 'COMPLETED'
+        insight.qualification_error = {}
+        insight.save(update_fields=['qualification_status', 'qualification_error'])
+
+        logger.info(f"Successfully qualified company '{company.name}' ({company.id}) for campaign '{campaign.name if campaign else 'N/A'}'. Score: {analysis.lead_score}")
+        return {
+            "status": "success",
+            "lead_id": str(company.id),
+            "campaign_id": str(campaign.id) if campaign else None,
+            "lead_score": analysis.lead_score,
+            "qualification_status": "COMPLETED"
+        }
+    except Exception as e:
+        logger.exception(f"Lead qualification failed for LeadCompany ID {lead_id}: {e}")
+        if insight:
+            insight.qualification_status = 'FAILED'
+            insight.qualification_error = {
+                "error": str(e),
+                "exception_type": type(e).__name__,
+            }
+            insight.save(update_fields=['qualification_status', 'qualification_error'])
+        raise e
+    finally:
+        cache.delete(lock_key)
+        logger.debug(f"Lock released for task: {lock_key}")
+
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 3},
+    retry_backoff=True,
+    time_limit=300
+)
+def identify_buying_group_async(lead_id: str, campaign_id: str = None):
+    """
+    Celery task to asynchronously identify buying group members for a LeadCompany and ProspectingCampaign.
+    Transitions CampaignLeadInsight.buying_group_status: QUEUED -> RUNNING -> COMPLETED (or FAILED).
+    Uses a Redis lock per lead and campaign to prevent concurrent duplicate jobs.
+    """
+    lock_key = f"lock:buying_group:{lead_id}:{campaign_id or 'default'}"
+    lock_acquired = cache.add(lock_key, "locked", timeout=600)
+
+    if not lock_acquired:
+        logger.warning(f"Task lock already held for key {lock_key}. Skipping execution.")
+        return {"status": "Skipped", "reason": "Buying group task lock already held."}
+
+    logger.info(f"Starting buying group identification for LeadCompany ID: {lead_id}, Campaign ID: {campaign_id}")
+
+    insight = None
+    try:
+        from prospecting.models import LeadCompany, ProspectingCampaign, CampaignLeadInsight
+        from prospecting.qualification.buying_group import BuyingGroupWorkflow
+
+        company = LeadCompany.objects.get(id=lead_id)
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
+
+        insight, _ = CampaignLeadInsight.objects.get_or_create(
+            company=company,
+            campaign=campaign,
+            defaults={'buying_group_status': 'QUEUED'}
+        )
+
+        insight.buying_group_status = 'RUNNING'
+        insight.save(update_fields=['buying_group_status'])
+
+        members = BuyingGroupWorkflow.run(company=company, campaign=campaign)
+
+        insight.refresh_from_db()
+        insight.buying_group_status = 'COMPLETED'
+        insight.buying_group_error = {}
+        insight.save(update_fields=['buying_group_status', 'buying_group_error'])
+
+        logger.info(f"Successfully identified {len(members)} buying group members for company '{company.name}' ({company.id}) in campaign '{campaign.name if campaign else 'N/A'}'.")
+        return {
+            "status": "success",
+            "lead_id": str(company.id),
+            "campaign_id": str(campaign.id) if campaign else None,
+            "members_count": len(members),
+            "buying_group_status": "COMPLETED"
+        }
+    except Exception as e:
+        logger.exception(f"Buying group identification failed for LeadCompany ID {lead_id}: {e}")
+        if insight:
+            insight.buying_group_status = 'FAILED'
+            insight.buying_group_error = {
+                "error": str(e),
+                "exception_type": type(e).__name__,
+            }
+            insight.save(update_fields=['buying_group_status', 'buying_group_error'])
+        raise e
+    finally:
+        cache.delete(lock_key)
+        logger.debug(f"Lock released for task: {lock_key}")
+
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 3},
+    retry_backoff=True,
+    time_limit=300
+)
+def generate_sales_guidance_async(
+    lead_id: str,
+    campaign_id: str = None,
+    person_id: str = None,
+    tone: str = "professional",
+    objective: str = "book_meeting"
+):
+    """
+    Celery task to asynchronously generate sales outreach guidance for a LeadCompany and ProspectingCampaign.
+    Transitions CampaignLeadInsight.sales_guidance_status: QUEUED -> RUNNING -> COMPLETED (or FAILED).
+    Uses a Redis lock per lead and campaign to prevent concurrent duplicate jobs.
+    """
+    lock_key = f"lock:sales_guidance:{lead_id}:{campaign_id or 'default'}"
+    lock_acquired = cache.add(lock_key, "locked", timeout=600)
+
+    if not lock_acquired:
+        logger.warning(f"Task lock already held for key {lock_key}. Skipping execution.")
+        return {"status": "Skipped", "reason": "Sales guidance task lock already held."}
+
+    logger.info(f"Starting sales guidance generation for LeadCompany ID: {lead_id}, Campaign ID: {campaign_id}")
+
+    insight = None
+    try:
+        from prospecting.models import LeadCompany, ProspectingCampaign, CampaignLeadInsight, Person, Evidence, SalesGuidance
+        from llm.router import IntelligentRouter
+        from llm.context import LLMRequestContext
+        import json
+
+        company = LeadCompany.objects.get(id=lead_id)
+        campaign = None
+        if campaign_id:
+            try:
+                campaign = ProspectingCampaign.objects.get(id=campaign_id)
+            except ProspectingCampaign.DoesNotExist:
+                campaign = None
+        if not campaign:
+            campaign = company.campaign or (company.discovery_run.campaign if company.discovery_run else None)
+
+        person = None
+        if person_id:
+            try:
+                person = Person.objects.get(id=person_id, company=company)
+            except Person.DoesNotExist:
+                person = None
+        if not person:
+            bg_member = company.buying_group_members.filter(campaign=campaign).first() if campaign else None
+            person = bg_member.person if bg_member else company.people.first()
+
+        insight, _ = CampaignLeadInsight.objects.get_or_create(
+            company=company,
+            campaign=campaign,
+            defaults={'sales_guidance_status': 'QUEUED'}
+        )
+
+        insight.sales_guidance_status = 'RUNNING'
+        insight.save(update_fields=['sales_guidance_status'])
+
+        evidence = Evidence.objects.filter(company=company)
+        evidence_text = "\n".join([f"- {ev.evidence_text} (Source: {ev.source_url})" for ev in evidence[:5]])
+
+        contact_name = person.name if person else "Operations Manager"
+        contact_title = person.title if person and person.title else "Ops Manager"
+        campaign_name = campaign.name if campaign else "Outbound Campaign"
+        product_description = campaign.product_description if campaign else "B2B Solution"
+
+        prompt = (
+            f"Create sales outreach guidance for target account '{company.name}' "
+            f"in campaign '{campaign_name}'. Product values: '{product_description}'.\n"
+            f"Contact person: {contact_name} (Title: {contact_title}).\n"
+            f"Tone: {tone}. Outreach objective: {objective}.\n"
+            f"Observed account evidence:\n{evidence_text}\n"
+        )
+
+        schema = (
+            "{"
+            '  "talking_points": ["string (value statement mapped to evidence)"],'
+            '  "recommended_angle": "string (value hook)",'
+            '  "recommended_next_step": "string (next CTA)",'
+            '  "message_draft": "string (email pitch copy)",'
+            '  "risks": ["string"],'
+            '  "unknowns": ["string"]'
+            "}"
+        )
+
+        system_prompt = "You are a senior AI sales development and copywriting strategist. Return ONLY raw JSON."
+        full_prompt = f"{prompt}\n\nSchema:\n{schema}\n\nReturn ONLY raw JSON."
+
+        router = IntelligentRouter()
+        with LLMRequestContext(
+            correlation_id=f"lead_guidance:{lead_id}",
+            operation="prospecting.lead_guidance",
+            metadata={
+                "company_id": str(company.id),
+                "company_name": company.name,
+                "campaign_id": str(campaign.id) if campaign else "",
+                "person_id": str(person.id) if person else "",
+            }
+        ):
+            result = router.generate(
+                prompt=full_prompt,
+                system_prompt=system_prompt,
+                prompt_key="prospecting.lead_guidance.user",
+                system_prompt_key="prospecting.lead_guidance.system",
+                template_variables={
+                    "company_name": company.name,
+                    "campaign_name": campaign_name,
+                    "product_description": product_description,
+                    "contact_name": contact_name,
+                    "contact_title": contact_title,
+                    "tone": tone,
+                    "objective": objective,
+                    "evidence": evidence_text
+                }
+            )
+
+        text = result.get("text", "").strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        elif text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+        data = json.loads(text)
+
+        guidance = SalesGuidance.objects.create(
+            company=company,
+            campaign=campaign,
+            person=person,
+            talking_points=data.get("talking_points", []),
+            recommended_angle=data.get("recommended_angle", "Direct Pitch"),
+            recommended_next_step=data.get("recommended_next_step", "Email pitch"),
+            message_draft=data.get("message_draft", ""),
+            risks=data.get("risks", []),
+            unknowns=data.get("unknowns", []),
+            metadata={"tone": tone, "objective": objective}
+        )
+
+        insight.refresh_from_db()
+        insight.sales_guidance_status = 'COMPLETED'
+        insight.sales_guidance_error = {}
+        insight.save(update_fields=['sales_guidance_status', 'sales_guidance_error'])
+
+        logger.info(f"Successfully generated sales guidance {guidance.id} for company '{company.name}' ({company.id}) in campaign '{campaign_name}'.")
+        return {
+            "status": "success",
+            "lead_id": str(company.id),
+            "campaign_id": str(campaign.id) if campaign else None,
+            "guidance_id": str(guidance.id),
+            "sales_guidance_status": "COMPLETED"
+        }
+    except Exception as e:
+        logger.exception(f"Sales guidance generation failed for LeadCompany ID {lead_id}: {e}")
+        if insight:
+            insight.sales_guidance_status = 'FAILED'
+            insight.sales_guidance_error = {
+                "error": str(e),
+                "exception_type": type(e).__name__,
+            }
+            insight.save(update_fields=['sales_guidance_status', 'sales_guidance_error'])
+        raise e
+    finally:
+        cache.delete(lock_key)
+        logger.debug(f"Lock released for task: {lock_key}")
+
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 2},
+    retry_backoff=True,
+    time_limit=600
+)
+def discover_more_leads_async(run_id: str, batch_size: int = 10):
+    """
+    Celery task to asynchronously run batch lead expansion ("Generate More Leads")
+    for an existing campaign DiscoveryRun.
+    Uses Redis lock per campaign to prevent duplicate concurrent batch generation.
+    """
+    from prospecting.models import DiscoveryRun
+    from prospecting.discovery.service import DiscoveryBatchService
+
+    try:
+        run = DiscoveryRun.objects.select_related('campaign', 'prospecting_request', 'specification_version').get(id=run_id)
+    except DiscoveryRun.DoesNotExist:
+        logger.error(f"DiscoveryRun {run_id} not found.")
+        return {"status": "error", "message": f"DiscoveryRun {run_id} not found."}
+
+    campaign = run.campaign
+    campaign_id = str(campaign.id) if campaign else "none"
+    lock_key = f"lock:discover_more:{campaign_id}"
+    lock_acquired = cache.add(lock_key, "locked", timeout=600)
+
+    if not lock_acquired:
+        logger.warning(f"Discover-more lock already held for campaign {campaign_id}. Skipping execution.")
+        run.status = 'failed'
+        run.save(update_fields=['status'])
+        return {"status": "skipped", "reason": "Campaign discovery batch already running."}
+
+    try:
+        run.status = 'running'
+        run.save(update_fields=['status'])
+
+        result = DiscoveryBatchService.generate_batch(
+            campaign=campaign,
+            batch_size=batch_size,
+            discovery_run=run
+        )
+        return result
+    except Exception as e:
+        logger.exception(f"discover_more_leads_async failed for run {run_id}: {e}")
+        run.status = 'failed'
+        run.save(update_fields=['status'])
+        raise e
+    finally:
+        cache.delete(lock_key)
+        logger.debug(f"Lock released for discover_more task: {lock_key}")
+
+

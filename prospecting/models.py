@@ -121,6 +121,14 @@ class DiscoveryRun(models.Model):
 
 
 class LeadCompany(models.Model):
+    ENRICHMENT_STATUS_CHOICES = [
+        ('NOT_STARTED', 'Not Started'),
+        ('QUEUED', 'Queued'),
+        ('RUNNING', 'Running'),
+        ('COMPLETED', 'Completed'),
+        ('FAILED', 'Failed'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     discovery_run = models.ForeignKey(DiscoveryRun, on_delete=models.CASCADE, related_name='companies', null=True, blank=True)
     campaign = models.ForeignKey(ProspectingCampaign, on_delete=models.CASCADE, related_name='companies', null=True, blank=True)
@@ -130,6 +138,13 @@ class LeadCompany(models.Model):
     address = models.TextField(null=True, blank=True)
     category = models.CharField(max_length=100, null=True, blank=True)
     rating = models.FloatField(default=0.0)
+    enrichment_status = models.CharField(
+        max_length=50,
+        choices=ENRICHMENT_STATUS_CHOICES,
+        default='NOT_STARTED',
+        db_index=True
+    )
+    enrichment_error = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -196,6 +211,30 @@ class CampaignLeadInsight(models.Model):
         ('UNKNOWN', 'Unknown'),
     ]
 
+    QUALIFICATION_STATUS_CHOICES = [
+        ('NOT_STARTED', 'Not Started'),
+        ('QUEUED', 'Queued'),
+        ('RUNNING', 'Running'),
+        ('COMPLETED', 'Completed'),
+        ('FAILED', 'Failed'),
+    ]
+
+    BUYING_GROUP_STATUS_CHOICES = [
+        ('NOT_STARTED', 'Not Started'),
+        ('QUEUED', 'Queued'),
+        ('RUNNING', 'Running'),
+        ('COMPLETED', 'Completed'),
+        ('FAILED', 'Failed'),
+    ]
+
+    SALES_GUIDANCE_STATUS_CHOICES = [
+        ('NOT_STARTED', 'Not Started'),
+        ('QUEUED', 'Queued'),
+        ('RUNNING', 'Running'),
+        ('COMPLETED', 'Completed'),
+        ('FAILED', 'Failed'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(
         LeadCompany,
@@ -207,6 +246,27 @@ class CampaignLeadInsight(models.Model):
         on_delete=models.CASCADE,
         related_name='lead_insights',
     )
+    qualification_status = models.CharField(
+        max_length=50,
+        choices=QUALIFICATION_STATUS_CHOICES,
+        default='NOT_STARTED',
+        db_index=True
+    )
+    qualification_error = models.JSONField(default=dict, blank=True)
+    buying_group_status = models.CharField(
+        max_length=50,
+        choices=BUYING_GROUP_STATUS_CHOICES,
+        default='NOT_STARTED',
+        db_index=True
+    )
+    buying_group_error = models.JSONField(default=dict, blank=True)
+    sales_guidance_status = models.CharField(
+        max_length=50,
+        choices=SALES_GUIDANCE_STATUS_CHOICES,
+        default='NOT_STARTED',
+        db_index=True
+    )
+    sales_guidance_error = models.JSONField(default=dict, blank=True)
     schema_version = models.PositiveSmallIntegerField(default=1)
     company_summary = models.TextField(blank=True, default='')
     industry = models.CharField(max_length=255, blank=True, default='')

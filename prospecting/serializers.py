@@ -127,9 +127,10 @@ class LeadCompanySerializer(serializers.ModelSerializer):
         model = LeadCompany
         fields = [
             'id', 'name', 'website', 'phone', 'address', 'category', 'rating',
+            'enrichment_status', 'enrichment_error',
             'lead_score', 'fit_class', 'buying_window_class', 'created_at',
             'discovery_run_id', 'discovery_run_keyword', 'discovery_run_location'
-          ]
+        ]
 
     def get_lead_score(self, obj):
         # Fetch from latest qualification or website analysis
