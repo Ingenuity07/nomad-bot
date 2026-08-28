@@ -760,6 +760,8 @@ class DiscoveryLead(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     discovery_run = models.ForeignKey(DiscoveryRun, on_delete=models.CASCADE, related_name='discovery_leads')
     company = models.ForeignKey(LeadCompany, on_delete=models.CASCADE, related_name='discovery_leads')
+    source_provider = models.CharField(max_length=100, null=True, blank=True)
+    search_query = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

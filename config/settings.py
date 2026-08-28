@@ -44,7 +44,18 @@ SECRET_KEY = 'django-insecure-qs+p#ex#4di*v=m6uqjim74r4a3r5ar&o*2^nk!n#8+1sivr3a
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+# Allowed Hostnames
+ALLOWED_HOSTS=[]
+allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "")
+if allowed_hosts_env:
+    ALLOWED_HOSTS = [host.strip() for host in allowed_hosts_env.split(",") if host.strip()]
+else:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '127.0.0.1:8000', 'localhost:8000', 'shareholders-workplace-like-morgan.trycloudflare.com']
+
+# CSRF Trusted Origins
+csrf_origins_env = os.environ.get("CSRF_TRUSTED_ORIGINS", "")
+if csrf_origins_env:
+    CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins_env.split(",") if origin.strip()]
 
 CORS_ALLOW_ALL_ORIGINS = True
 

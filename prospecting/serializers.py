@@ -122,6 +122,8 @@ class LeadCompanySerializer(serializers.ModelSerializer):
     discovery_run_id = serializers.UUIDField(source='discovery_run.id', read_only=True, allow_null=True)
     discovery_run_keyword = serializers.CharField(source='discovery_run.keyword', read_only=True, allow_null=True)
     discovery_run_location = serializers.CharField(source='discovery_run.location', read_only=True, allow_null=True)
+    sources = serializers.SerializerMethodField()
+    primary_source = serializers.SerializerMethodField()
 
     class Meta:
         model = LeadCompany
@@ -129,8 +131,21 @@ class LeadCompanySerializer(serializers.ModelSerializer):
             'id', 'name', 'website', 'phone', 'address', 'category', 'rating',
             'enrichment_status', 'enrichment_error',
             'lead_score', 'fit_class', 'buying_window_class', 'created_at',
-            'discovery_run_id', 'discovery_run_keyword', 'discovery_run_location'
+            'discovery_run_id', 'discovery_run_keyword', 'discovery_run_location',
+            'sources', 'primary_source'
         ]
+
+    def get_sources(self, obj):
+        return list(obj.sources.values_list('provider', flat=True).distinct())
+
+    def get_primary_source(self, obj):
+        first_src = obj.sources.first()
+        if first_src:
+            return first_src.provider
+        first_disc = obj.discovery_leads.filter(source_provider__isnull=False).first()
+        if first_disc and first_disc.source_provider:
+            return first_disc.source_provider
+        return "web_search"
 
     def get_lead_score(self, obj):
         # Fetch from latest qualification or website analysis

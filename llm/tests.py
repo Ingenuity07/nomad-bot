@@ -610,6 +610,75 @@ class LLMGenericModelRoutingTestCase(TestCase):
             # Must halt on 401 without wasting retries across all pool models
             self.assertEqual(res.attempts, 1)
 
+    def test_quota_exceeded_error_short_circuits_and_blacklists(self):
+        from llm.router import IntelligentRouter
+        from llm.contracts import LLMRequest
+        from llm.enums import LLMOperation, LLMComplexity
+        from unittest.mock import patch, MagicMock
+
+        router = IntelligentRouter()
+        # Reset health monitor to ensure clean slate
+        router.health_monitor.reset()
+
+        # Mock adapter to return quota exceeded error
+        quota_adapter = MagicMock()
+        quota_adapter.model_name = "gemini-3.7-flash"
+        quota_adapter.generate.return_value = {
+            "type": "error",
+            "status_code": 429,
+            "text": "Resource has been exhausted (e.g. queries per minute or daily quota)."
+        }
+
+        # Mock second adapter in the pool to succeed
+        success_adapter = MagicMock()
+        success_adapter.model_name = "gemini-3.6-flash"
+        success_adapter.generate.return_value = {"type": "text", "text": "Success fallback"}
+
+        def mock_get_adapter(cfg):
+            if cfg.model_name == "gemini-3.7-flash":
+                return quota_adapter
+            return success_adapter
+
+        with patch.object(router, "_get_adapter_for_model", side_effect=mock_get_adapter), \
+             patch('time.sleep') as mock_sleep:
+            
+            # First request: gemini-3.7-flash fails with quota exceeded, router should fall back to gemini-3.6-flash
+            req = LLMRequest(
+                operation=LLMOperation.GENERATE,
+                complexity=LLMComplexity.COMPLEX,
+                prompt="Hello"
+            )
+            res = router.execute(req)
+            
+            # Assertions for the first execution
+            self.assertTrue(res.is_success())
+            self.assertEqual(res.output, "Success fallback")
+            self.assertEqual(res.model, "gemini-3.6-flash")
+            
+            # Verify no sleep retries were attempted for quota exceeded (since attempt is 1, sleep is 0 times)
+            mock_sleep.assert_not_called()
+            
+            # Verify the failed model (gemini-3.7-flash) is blacklisted/cooldown in health monitor
+            self.assertFalse(router.health_monitor.is_healthy("google", "gemini-3.7-flash"))
+            
+            # Verify the cooldown is custom: 12 hours (43200s)
+            status = router.health_monitor.health_status.get("google:gemini-3.7-flash")
+            self.assertIsNotNone(status)
+            cooldown_until = status.get("cooldown_until", 0)
+            failed_at = status.get("failed_at", 0)
+            # Difference should be exactly 43200 seconds
+            self.assertAlmostEqual(cooldown_until - failed_at, 43200, places=1)
+
+            # Second request: router should immediately skip gemini-3.7-flash without executing its adapter
+            quota_adapter.generate.reset_mock()
+            res2 = router.execute(req)
+            
+            self.assertTrue(res2.is_success())
+            self.assertEqual(res2.output, "Success fallback")
+            # quota_adapter shouldn't even be called this time
+            quota_adapter.generate.assert_not_called()
+
+
 
 
 

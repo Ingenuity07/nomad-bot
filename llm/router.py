@@ -31,6 +31,12 @@ RETRYABLE_ERROR_CATEGORIES = {
 }
 
 def classify_error(status_code: Optional[int] = None, error_text: str = "") -> LLMErrorCategory:
+    err_lower = error_text.lower()
+    
+    # Check for quota limits first (since they might come with 429 status code)
+    if "quota" in err_lower or "daily limit" in err_lower or "exhausted" in err_lower:
+        return LLMErrorCategory.QUOTA_EXCEEDED
+
     if status_code == 429:
         return LLMErrorCategory.RATE_LIMITED
     if status_code in (401, 403):
@@ -42,11 +48,8 @@ def classify_error(status_code: Optional[int] = None, error_text: str = "") -> L
     if status_code in (500, 502, 503, 504):
         return LLMErrorCategory.TEMPORARY_PROVIDER_ERROR
     
-    err_lower = error_text.lower()
     if "rate limit" in err_lower or "429" in err_lower or "resource_exhausted" in err_lower:
         return LLMErrorCategory.RATE_LIMITED
-    if "quota" in err_lower:
-        return LLMErrorCategory.QUOTA_EXCEEDED
     if "timeout" in err_lower or "timed out" in err_lower:
         return LLMErrorCategory.TIMEOUT
     if "schema" in err_lower or "validation" in err_lower:
@@ -241,6 +244,10 @@ class IntelligentRouter(BaseLLMProvider):
                     or "too many requests" in err_text.lower()
                     or "service unavailable" in err_text.lower()
                 )
+                cat = classify_error(status_code, err_text)
+                if cat == LLMErrorCategory.QUOTA_EXCEEDED:
+                    is_transient = False
+                    
                 if is_transient and attempt < 2:
                     retry_after = result.get("retry_after")
                     wait_time = int(retry_after) if (retry_after and retry_after.isdigit()) else (attempt + 1)
@@ -347,6 +354,21 @@ class IntelligentRouter(BaseLLMProvider):
         """Get the active conversation ID from thread-local storage."""
         return getattr(self._thread_local, "conversation_id", None)
 
+    def _report_failure_with_cooldown(self, config: ModelConfig, cat: LLMErrorCategory, status_code: Optional[int]):
+        """Blacklist provider/model with a custom cooldown period based on error category."""
+        blacklist_duration = 120
+        if cat == LLMErrorCategory.QUOTA_EXCEEDED:
+            blacklist_duration = 43200  # 12 hours (done for the day)
+        elif cat == LLMErrorCategory.RATE_LIMITED:
+            blacklist_duration = 600    # 10 minutes
+            
+        self.health_monitor.report_failure(
+            config.provider_key,
+            config.model_name,
+            status_code=status_code,
+            blacklist_duration=blacklist_duration
+        )
+
     def execute(self, request: LLMRequest) -> LLMResult:
         """
         Generic execution contract:
@@ -430,7 +452,7 @@ class IntelligentRouter(BaseLLMProvider):
                 cat = classify_error(status_code, err_text)
                 last_error_category = cat
                 last_error_message = err_text
-                self.health_monitor.report_failure(config.provider_key, config.model_name, status_code=status_code)
+                self._report_failure_with_cooldown(config, cat, status_code=status_code)
 
                 if cat not in RETRYABLE_ERROR_CATEGORIES:
                     logger.warning(f"Non-retryable error ({cat}) on model '{config.model_name}': {err_text}")
@@ -524,7 +546,7 @@ class IntelligentRouter(BaseLLMProvider):
                 cat = classify_error(status_code, err_text)
                 last_error_category = cat
                 last_error_message = err_text
-                self.health_monitor.report_failure(config.provider_key, config.model_name, status_code=status_code)
+                self._report_failure_with_cooldown(config, cat, status_code=status_code)
                 continue
 
             self.health_monitor.report_success(config.provider_key, config.model_name)

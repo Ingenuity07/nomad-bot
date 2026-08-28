@@ -596,13 +596,6 @@ def discover_campaign_async(run_id: str, enrich_leads: bool = False):
                     )
         logger.debug(f"Discovered {len(discovered_leads)} raw leads.")
 
-        # Cap discovered leads list to respect settings.PROSPECTING_MAX_LEADS_PER_RUN limit
-        from django.conf import settings
-        max_leads = getattr(settings, "PROSPECTING_MAX_LEADS_PER_RUN", 10)
-        if len(discovered_leads) > max_leads:
-            logger.info(f"Capping discovered leads from {len(discovered_leads)} to {max_leads} (via settings.PROSPECTING_MAX_LEADS_PER_RUN)")
-            discovered_leads = discovered_leads[:max_leads]
-
         # 2. Entity Resolution & Deduplication
         ensure_discovery_run_active(run)
         broadcast_progress(run_id, "resolving", 40, "Deduplicating discovered leads...")
@@ -610,14 +603,19 @@ def discover_campaign_async(run_id: str, enrich_leads: bool = False):
         duplicate_count = 0
         leads_to_process = []
 
+        from prospecting.models import CompanySource, DiscoveryLead
+
         for item in discovered_leads:
             ensure_discovery_run_active(run)
             existing = Deduplicator.find_existing_company(item)
+            source_provider = (item.raw_reference or {}).get("source_provider") or "web_search"
+            search_query = (item.raw_reference or {}).get("search_category") or (item.raw_reference or {}).get("query") or ""
+            source_url = item.website or None
+            ext_id = item.external_id or item.website or None
+
             if existing:
                 duplicate_count += 1
-                from prospecting.models import DiscoveryLead
-                DiscoveryLead.objects.get_or_create(discovery_run=run, company=existing)
-                leads_to_process.append(existing)
+                target_company = existing
             else:
                 company = LeadCompanyRepository.create_company(
                     discovery_run=run,
@@ -628,9 +626,44 @@ def discover_campaign_async(run_id: str, enrich_leads: bool = False):
                     category=item.category
                 )
                 new_count += 1
-                from prospecting.models import DiscoveryLead
-                DiscoveryLead.objects.get_or_create(discovery_run=run, company=company)
-                leads_to_process.append(company)
+                target_company = company
+
+            # Record provenance on CompanySource
+            try:
+                if ext_id:
+                    CompanySource.objects.get_or_create(
+                        company=target_company,
+                        provider=source_provider,
+                        external_id=ext_id,
+                        defaults={
+                            "source_type": "discovery",
+                            "source_url": source_url,
+                            "raw_reference": item.raw_reference or {}
+                        }
+                    )
+                else:
+                    CompanySource.objects.get_or_create(
+                        company=target_company,
+                        provider=source_provider,
+                        defaults={
+                            "source_type": "discovery",
+                            "source_url": source_url,
+                            "raw_reference": item.raw_reference or {}
+                        }
+                    )
+            except Exception as cs_err:
+                logger.warning(f"Failed to record CompanySource for company {target_company.id}: {cs_err}")
+
+            # Record DiscoveryLead run link with source details
+            DiscoveryLead.objects.update_or_create(
+                discovery_run=run,
+                company=target_company,
+                defaults={
+                    "source_provider": source_provider,
+                    "search_query": search_query
+                }
+            )
+            leads_to_process.append(target_company)
 
         # 3. Candidate handoff
         # Discovery stops after finding and resolving candidates. Website crawling,

@@ -220,8 +220,7 @@ class DiscoveryLeadCappingTestCase(TestCase):
     @patch("prospecting.tasks.ContactExtractor")
     @patch("prospecting.tasks.broadcast_progress")
     @patch("prospecting.tasks.broadcast_completion")
-    @override_settings(PROSPECTING_MAX_LEADS_PER_RUN=1)
-    def test_cap_leads_limit_enforced(
+    def test_all_discovered_leads_saved_with_provenance(
         self, mock_broadcast_completion, mock_broadcast_progress, mock_contact_extractor,
         mock_website_analyzer, mock_execute
     ):
@@ -253,7 +252,30 @@ class DiscoveryLeadCappingTestCase(TestCase):
 
         result = discover_campaign_async(str(self.run.id))
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["leads_found"], 1)  # Capped at 1 lead
+        # All discovered leads are saved without truncation
+        self.assertEqual(result["leads_found"], 2)
+        
+        # Verify DiscoveryLead entries have source_provider set
+        from prospecting.models import DiscoveryLead, CompanySource
+        disc_leads = DiscoveryLead.objects.filter(discovery_run=self.run)
+        self.assertEqual(disc_leads.count(), 2)
+        for dl in disc_leads:
+            self.assertEqual(dl.source_provider, "google_places")
+            
+        # Verify CompanySource records are created
+        self.assertEqual(CompanySource.objects.filter(company__discovery_run=self.run).count(), 2)
+
+        # Test the leads API endpoint directly with filters and facets
+        from rest_framework.test import APIClient
+        client = APIClient()
+        url = f"/api/v3/prospecting/discovery-runs/{self.run.id}/leads/"
+        response = client.get(url, {"sources": "google_places", "page": 1, "page_size": 10})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["total_count"], 2)
+        self.assertIn("google_places", response.data["available_sources"])
+        self.assertIn("Pest Control", response.data["available_categories"])
+        self.assertEqual(len(response.data["leads"]), 2)
+        self.assertEqual(response.data["leads"][0]["source"], "google_places")
 
 
 class StrategyFormulationTestCase(TestCase):

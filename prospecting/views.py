@@ -15,7 +15,7 @@ from prospecting.models import (
     Evidence, CompanySignal, Person, ContactPoint, BuyingGroupMember,
     TargetList, ListMembership, CampaignEnrollment, SalesGuidance, ProspectingCampaign, CampaignLeadInsight,
     EmailSequence, EmailMessage, EmailBounce, EmailUnsubscribe, InboundReply, LeadFeedback,
-    get_default_workspace, CRMIntegrationRecord
+    get_default_workspace, CRMIntegrationRecord, DiscoveryLead, CompanySource
 )
 from prospecting.serializers import (
     ProblemSignalSerializer, LeadCompanySerializer, EvidenceSerializer,
@@ -116,8 +116,14 @@ class ProspectingLeadsAPIView(APIView):
     def get(self, request):
         # 1. Fetch query filters
         score_min = request.query_params.get("score_min")
+        score_max = request.query_params.get("score_max")
         location = request.query_params.get("location")
-        category = request.query_params.get("category")
+        category_param = request.query_params.get("category") or request.query_params.get("categories")
+        source_param = request.query_params.get("source") or request.query_params.get("sources")
+        status_param = request.query_params.get("status") or request.query_params.get("research_status") or request.query_params.get("research_statuses")
+        has_website = request.query_params.get("has_website")
+        has_phone = request.query_params.get("has_phone")
+        q = request.query_params.get("q") or request.query_params.get("search")
         campaign_id = getattr(request, 'campaign_id', None) or request.query_params.get("campaign_id")
         run_id = getattr(request, 'run_id', None) or request.query_params.get("run_id")
         
@@ -129,19 +135,84 @@ class ProspectingLeadsAPIView(APIView):
             page = 1
             page_size = 10
 
-        # Build filter set
+        # Build base filter set by workspace and campaign/run scope
         workspace = get_default_workspace()
-        queryset = LeadCompany.objects.select_related(
+        base_queryset = LeadCompany.objects.select_related(
             'analysis', 'campaign', 'discovery_run__campaign'
         ).prefetch_related(
-            'contacts', 'campaign_insights', 'research_runs'
+            'contacts', 'campaign_insights', 'research_runs', 'sources', 'discovery_leads'
         ).filter(
             Q(campaign__workspace=workspace) |
             Q(discovery_run__campaign__workspace=workspace) |
             Q(discovery_leads__discovery_run__campaign__workspace=workspace) |
             Q(campaign__isnull=True, discovery_run__campaign__isnull=True)
         ).distinct()
+
+        if campaign_id and campaign_id.strip():
+            base_queryset = base_queryset.filter(
+                Q(campaign_id=campaign_id.strip()) |
+                Q(discovery_run__campaign_id=campaign_id.strip()) |
+                Q(discovery_leads__discovery_run__campaign_id=campaign_id.strip())
+            ).distinct()
+        if run_id and run_id.strip():
+            base_queryset = base_queryset.filter(
+                Q(discovery_run_id=run_id.strip()) |
+                Q(discovery_leads__discovery_run_id=run_id.strip())
+            ).distinct()
+
+        # Extract available facets across the entire scope
+        available_categories = sorted(list(set([cat for cat in base_queryset.values_list('category', flat=True).distinct() if cat])))
         
+        # Available sources from both DiscoveryLead and CompanySource
+        available_sources_dl = list(DiscoveryLead.objects.filter(company__in=base_queryset).values_list('source_provider', flat=True).distinct())
+        available_sources_cs = list(CompanySource.objects.filter(company__in=base_queryset).values_list('provider', flat=True).distinct())
+        available_sources = sorted(list(set([s for s in (available_sources_dl + available_sources_cs) if s])))
+        if not available_sources:
+            available_sources = ["google_places", "duckduckgo", "web_search"]
+        available_statuses = ["NOT_STARTED", "QUEUED", "RUNNING", "COMPLETED", "FAILED"]
+
+        # 3. Apply user filters
+        queryset = base_queryset
+
+        if q and q.strip():
+            query_str = q.strip()
+            queryset = queryset.filter(
+                Q(name__icontains=query_str) |
+                Q(website__icontains=query_str) |
+                Q(address__icontains=query_str) |
+                Q(category__icontains=query_str)
+            )
+
+        if location and location.strip():
+            queryset = queryset.filter(address__icontains=location.strip())
+
+        if category_param and category_param.strip():
+            cat_list = [c.strip() for c in category_param.split(',') if c.strip()]
+            if cat_list:
+                queryset = queryset.filter(category__in=cat_list)
+
+        if source_param and source_param.strip():
+            src_list = [s.strip() for s in source_param.split(',') if s.strip()]
+            if src_list:
+                queryset = queryset.filter(
+                    Q(sources__provider__in=src_list) |
+                    Q(discovery_leads__source_provider__in=src_list)
+                ).distinct()
+
+        if has_website is not None:
+            hw_str = str(has_website).lower().strip()
+            if hw_str in ('true', '1', 'yes'):
+                queryset = queryset.filter(website__isnull=False).exclude(website='')
+            elif hw_str in ('false', '0', 'no'):
+                queryset = queryset.filter(Q(website__isnull=True) | Q(website=''))
+
+        if has_phone is not None:
+            hp_str = str(has_phone).lower().strip()
+            if hp_str in ('true', '1', 'yes'):
+                queryset = queryset.filter(phone__isnull=False).exclude(phone='')
+            elif hp_str in ('false', '0', 'no'):
+                queryset = queryset.filter(Q(phone__isnull=True) | Q(phone=''))
+
         if score_min:
             try:
                 minimum_score = max(0.0, min(float(score_min), 100.0))
@@ -154,21 +225,19 @@ class ProspectingLeadsAPIView(APIView):
                 ).distinct()
             except ValueError:
                 pass
-        if location and location.strip():
-            queryset = queryset.filter(address__icontains=location.strip())
-        if category and category.strip():
-            queryset = queryset.filter(category__iexact=category.strip())
-        if campaign_id and campaign_id.strip():
-            queryset = queryset.filter(
-                Q(campaign_id=campaign_id.strip()) |
-                Q(discovery_run__campaign_id=campaign_id.strip()) |
-                Q(discovery_leads__discovery_run__campaign_id=campaign_id.strip())
-            ).distinct()
-        if run_id and run_id.strip():
-            queryset = queryset.filter(
-                Q(discovery_run_id=run_id.strip()) |
-                Q(discovery_leads__discovery_run_id=run_id.strip())
-            ).distinct()
+
+        if score_max:
+            try:
+                maximum_score = max(0.0, min(float(score_max), 100.0))
+                insight_filter = Q(campaign_insights__fit_score__lte=maximum_score)
+                if campaign_id:
+                    insight_filter &= Q(campaign_insights__campaign_id=campaign_id)
+                queryset = queryset.filter(
+                    insight_filter |
+                    Q(analysis__lead_score__lte=maximum_score / 10)
+                ).distinct()
+            except ValueError:
+                pass
             
         queryset = queryset.order_by('-created_at', 'name')
         
@@ -242,6 +311,15 @@ class ProspectingLeadsAPIView(APIView):
                 research_status = 'NOT_STARTED'
             data_locked = not has_analysis
 
+            company_sources = [s.provider for s in c.sources.all()]
+            primary_source = None
+            if run_id:
+                disc_lead = next((dl for dl in c.discovery_leads.all() if str(dl.discovery_run_id) == str(run_id)), None)
+                if disc_lead and disc_lead.source_provider:
+                    primary_source = disc_lead.source_provider
+            if not primary_source:
+                primary_source = company_sources[0] if company_sources else "web_search"
+
             leads.append({
                 "id": str(c.id),
                 "name": c.name,
@@ -250,6 +328,8 @@ class ProspectingLeadsAPIView(APIView):
                 "address": c.address,
                 "category": c.category,
                 "rating": c.rating,
+                "source": primary_source,
+                "sources": company_sources,
                 "contacts": [] if data_locked else raw_contacts,
                 "analysis": {} if data_locked else analysis_data,
                 "data_locked": data_locked,
@@ -259,17 +339,17 @@ class ProspectingLeadsAPIView(APIView):
                 "created_at": c.created_at.isoformat()
             })
 
-        # Dynamically fetch distinct list of non-empty categories in CRM for filter dropdowns
-        unique_categories = list(queryset.values_list('category', flat=True).distinct())
-        unique_categories = sorted(list(set([cat for cat in unique_categories if cat])))
-
         return Response({
             "leads": leads,
             "total_count": total_count,
             "page": page,
             "page_size": page_size,
             "total_pages": total_pages,
-            "categories": unique_categories
+            "categories": available_categories,
+            "sources": available_sources,
+            "available_categories": available_categories,
+            "available_sources": available_sources,
+            "available_statuses": available_statuses
         }, status=status.HTTP_200_OK)
 
 

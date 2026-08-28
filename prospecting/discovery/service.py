@@ -6,7 +6,7 @@ from django.db.models import Q
 from knowledge_base.models import UserProfile
 from prospecting.models import (
     ProspectingCampaign, DiscoveryRun, LeadCompany, DiscoveryLead,
-    CampaignLeadInsight, ProspectingSpecificationVersion
+    CampaignLeadInsight, ProspectingSpecificationVersion, CompanySource
 )
 from prospecting.discovery.dto import DiscoveryResultItem
 from prospecting.discovery.deduplication import Deduplicator
@@ -277,6 +277,12 @@ class DiscoveryBatchService:
                 break
 
             existing_company = Deduplicator.find_existing_company(item)
+            source_provider = (item.raw_reference or {}).get("source_provider") or "web_search"
+            search_query = (item.raw_reference or {}).get("query") or (item.raw_reference or {}).get("search_category") or ""
+            source_url = item.website or None
+            ext_id = item.external_id or item.website or None
+
+            target_company = None
             if existing_company:
                 # Check if this company is already in this campaign
                 if existing_company.id in existing_campaign_company_ids:
@@ -284,10 +290,7 @@ class DiscoveryBatchService:
                     continue
                 else:
                     # Associate existing company to this campaign
-                    DiscoveryLead.objects.get_or_create(discovery_run=run, company=existing_company)
-                    CampaignLeadInsight.objects.get_or_create(company=existing_company, campaign=campaign)
-                    existing_campaign_company_ids.add(existing_company.id)
-                    newly_added_leads.append(existing_company)
+                    target_company = existing_company
             else:
                 # Create brand new LeadCompany
                 new_company = LeadCompany.objects.create(
@@ -300,10 +303,46 @@ class DiscoveryBatchService:
                     category=item.category[:100] if item.category else None,
                     enrichment_status='NOT_STARTED'
                 )
-                DiscoveryLead.objects.get_or_create(discovery_run=run, company=new_company)
-                CampaignLeadInsight.objects.get_or_create(company=new_company, campaign=campaign)
-                existing_campaign_company_ids.add(new_company.id)
-                newly_added_leads.append(new_company)
+                target_company = new_company
+
+            # Record provenance on CompanySource
+            try:
+                if ext_id:
+                    CompanySource.objects.get_or_create(
+                        company=target_company,
+                        provider=source_provider,
+                        external_id=ext_id,
+                        defaults={
+                            "source_type": "discovery_batch",
+                            "source_url": source_url,
+                            "raw_reference": item.raw_reference or {}
+                        }
+                    )
+                else:
+                    CompanySource.objects.get_or_create(
+                        company=target_company,
+                        provider=source_provider,
+                        defaults={
+                            "source_type": "discovery_batch",
+                            "source_url": source_url,
+                            "raw_reference": item.raw_reference or {}
+                        }
+                    )
+            except Exception as cs_err:
+                logger.warning(f"Failed to record CompanySource for company {target_company.id}: {cs_err}")
+
+            # Record DiscoveryLead run link with source details
+            DiscoveryLead.objects.update_or_create(
+                discovery_run=run,
+                company=target_company,
+                defaults={
+                    "source_provider": source_provider,
+                    "search_query": search_query
+                }
+            )
+            CampaignLeadInsight.objects.get_or_create(company=target_company, campaign=campaign)
+            existing_campaign_company_ids.add(target_company.id)
+            newly_added_leads.append(target_company)
 
         # 6. Check for search space exhaustion
         is_exhausted = (len(newly_added_leads) < batch_size)
