@@ -24,3 +24,6 @@ RUN playwright install-deps chromium
 
 # Copy project files
 COPY . /app/
+
+# Ensure run script is executable
+RUN chmod +x /app/scripts/run_worker.sh

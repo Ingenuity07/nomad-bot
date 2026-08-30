@@ -81,6 +81,7 @@ INSTALLED_APPS = [
     'llm',
     'knowledge_base',
     'prospecting',
+    'integrations.instagram',
 ]
 
 MIDDLEWARE = [
@@ -259,6 +260,38 @@ UNFOLD = {
                 ],
             },
             {
+                "title": "Instagram CRM",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Accounts",
+                        "icon": "account_circle",
+                        "link": "/admin/instagram_integration/instagramaccount/",
+                    },
+                    {
+                        "title": "Automations",
+                        "icon": "bolt",
+                        "link": "/admin/instagram_integration/instagramautomation/",
+                    },
+                    {
+                        "title": "Webhook Events",
+                        "icon": "webhook",
+                        "link": "/admin/instagram_integration/instagramwebhookevent/",
+                    },
+                    {
+                        "title": "Actions Log",
+                        "icon": "history",
+                        "link": "/admin/instagram_integration/instagramautomationaction/",
+                    },
+                    {
+                        "title": "OAuth States",
+                        "icon": "vpn_key",
+                        "link": "/admin/instagram_integration/instagramoauthstate/",
+                    },
+                ],
+            },
+            {
                 "title": "System",
                 "separator": True,
                 "collapsible": True,
@@ -297,11 +330,26 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
 
+# Redis Configuration (Supports REDIS_URL for remote/production or REDIS_HOST for local)
+REDIS_URL = os.environ.get("REDIS_URL", "")
+redis_host = os.environ.get("REDIS_HOST", "127.0.0.1")
+
+if REDIS_URL:
+    channel_layer_hosts = [REDIS_URL]
+    celery_broker = REDIS_URL
+    celery_backend = REDIS_URL
+    cache_location = REDIS_URL
+else:
+    channel_layer_hosts = [(redis_host, 6379)]
+    celery_broker = f'redis://{redis_host}:6379/0'
+    celery_backend = f'redis://{redis_host}:6379/0'
+    cache_location = f'redis://{redis_host}:6379/1'
+
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [(os.environ.get("REDIS_HOST", "127.0.0.1"), 6379)],
+            "hosts": channel_layer_hosts,
         },
     },
 }
@@ -311,6 +359,8 @@ CHANNEL_LAYERS = {
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
 import sys
+import dj_database_url
+
 if 'test' in sys.argv:
     from django.test import TestCase, TransactionTestCase
     TestCase.databases = {'default', 'telemetry'}
@@ -343,15 +393,25 @@ if 'test' in sys.argv:
         }
     }
 else:
-    DATABASES = {
-        'default': {
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        default_db_config = dj_database_url.parse(
+            database_url,
+            conn_max_age=int(os.environ.get("DB_CONN_MAX_AGE", 0)),
+            ssl_require=os.environ.get("DB_SSL_REQUIRE", "False").lower() in ("true", "1", "yes") or "supabase" in database_url,
+        )
+    else:
+        default_db_config = {
             'ENGINE': 'django.db.backends.postgresql',
             'NAME': os.environ.get('POSTGRES_DB', 'aios_db'),
             'USER': os.environ.get('POSTGRES_USER', 'postgres'),
             'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'password'),
             'HOST': os.environ.get('POSTGRES_HOST', '127.0.0.1'),
             'PORT': os.environ.get('POSTGRES_PORT', '5433'),
-        },
+        }
+
+    DATABASES = {
+        'default': default_db_config,
         'telemetry': {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': os.environ.get('LLM_TELEMETRY_DB_PATH', str(BASE_DIR / 'llm_telemetry.sqlite3')),
@@ -404,9 +464,8 @@ DISCOVERY_TRACE_DIR = Path(os.environ.get("DISCOVERY_TRACE_DIR", BASE_DIR / "dis
 DISCOVERY_TRACE_STRING_LIMIT = int(os.environ.get("DISCOVERY_TRACE_STRING_LIMIT", "100000"))
 
 # Celery Settings
-redis_host = os.environ.get("REDIS_HOST", "127.0.0.1")
-CELERY_BROKER_URL = f'redis://{redis_host}:6379/0'
-CELERY_RESULT_BACKEND = f'redis://{redis_host}:6379/0'
+CELERY_BROKER_URL = celery_broker
+CELERY_RESULT_BACKEND = celery_backend
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
@@ -419,7 +478,7 @@ CELERY_TASK_EAGER_PROPAGATES = CELERY_TASK_ALWAYS_EAGER
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": f"redis://{redis_host}:6379/1",
+        "LOCATION": cache_location,
     }
 }
 
@@ -478,5 +537,18 @@ SPECTACULAR_SETTINGS = {
 
 # Cap leads collected per discovery run
 PROSPECTING_MAX_LEADS_PER_RUN = int(os.environ.get("PROSPECTING_MAX_LEADS_PER_RUN", 10))
+
+# ── Instagram Integration Settings ──────────────────────────────────────────
+INSTAGRAM_APP_ID = os.environ.get("INSTAGRAM_APP_ID", "")
+INSTAGRAM_APP_SECRET = os.environ.get("INSTAGRAM_APP_SECRET", "")
+INSTAGRAM_REDIRECT_URI = os.environ.get(
+    "INSTAGRAM_REDIRECT_URI",
+    "http://localhost:8000/api/v3/integrations/instagram/oauth/callback/"
+)
+INSTAGRAM_WEBHOOK_VERIFY_TOKEN = os.environ.get("INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "")
+INSTAGRAM_GRAPH_API_VERSION = os.environ.get("INSTAGRAM_GRAPH_API_VERSION", "v21.0")
+INSTAGRAM_TOKEN_ENCRYPTION_KEY = os.environ.get("INSTAGRAM_TOKEN_ENCRYPTION_KEY", "")
+INSTAGRAM_HTTP_TIMEOUT_SECONDS = int(os.environ.get("INSTAGRAM_HTTP_TIMEOUT_SECONDS", "15"))
+INSTAGRAM_MAX_RETRY_ATTEMPTS = int(os.environ.get("INSTAGRAM_MAX_RETRY_ATTEMPTS", "3"))
 
 

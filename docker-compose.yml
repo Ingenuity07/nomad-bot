@@ -6,9 +6,24 @@ services:
     ports:
       - "6379:6379"
 
+  worker:
+    build: .
+    command: bash scripts/run_worker.sh
+    ports:
+      - "10000:10000"
+    volumes:
+      - .:/app
+    environment:
+      - REDIS_HOST=redis
+      - PORT=10000
+    env_file:
+      - .env
+    depends_on:
+      - redis
+
   celery:
     build: .
-    command: celery -A config worker --loglevel=info
+    command: celery -A config worker --loglevel=info --concurrency=1
     volumes:
       - .:/app
     environment:
