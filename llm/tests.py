@@ -85,7 +85,7 @@ class DummyCompanyProvider(CompanyDiscoveryProvider):
 # =====================================================================
 
 class ToolPlatformTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     def setUp(self):
         self.registry = ToolRegistry()
         self.executor = ToolExecutor(self.registry)
@@ -215,7 +215,7 @@ class ToolPlatformTestCase(TestCase):
 
 
 class GeminiReliabilityTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     @patch("llm.gemini_api.requests.post")
     def test_gemini_error_preserves_http_status_and_message(self, mock_post):
         response = MagicMock()
@@ -256,7 +256,7 @@ class GeminiReliabilityTestCase(TestCase):
 
 
 class PromptRegistryTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     def test_prompt_creation_and_active_uniqueness(self):
         from llm.models import LLMPrompt
         from django.core.exceptions import ValidationError
@@ -298,7 +298,7 @@ class PromptRegistryTestCase(TestCase):
         p = LLMPrompt.objects.create(key="immutable.test", version=1, template="Initial template", is_active=True)
 
         # Associate with a PromptRun
-        PromptRun.objects.using('telemetry').create(
+        PromptRun.objects.create(
             purpose="test",
             prompt_text="Initial template",
             response_text="ok",
@@ -325,7 +325,7 @@ class PromptRegistryTestCase(TestCase):
 
 
 class LLMObservabilityTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     def test_request_context_propagation_and_merging(self):
         from llm.context import LLMRequestContext
 
@@ -397,7 +397,7 @@ class LLMObservabilityTestCase(TestCase):
         self.assertEqual(res["type"], "text")
         
         # Verify PromptRun DB record fields
-        run_record = PromptRun.objects.using('telemetry').filter(correlation_id="corr_99").first()
+        run_record = PromptRun.objects.filter(correlation_id="corr_99").first()
         self.assertIsNotNone(run_record)
         self.assertEqual(run_record.operation, "test_op")
         self.assertEqual(run_record.prompt_key, "observe.prompt")
@@ -412,40 +412,26 @@ class LLMObservabilityTestCase(TestCase):
         self.assertGreater(run_record.total_cost, 0.0)
 
 
-class TelemetryDatabaseSeparationTestCase(TestCase):
-    databases = {'default', 'telemetry'}
-    def test_database_routing_separation(self):
+class TelemetryDatabaseTestCase(TestCase):
+    databases = {'default'}
+    def test_promptrun_persists_in_default_db(self):
         from llm.models import LLMPrompt, PromptRun
 
         # 1. LLMPrompt uses default database
-        p = LLMPrompt.objects.create(key="db.separation.test", template="Hello separation test!")
+        p = LLMPrompt.objects.create(key="db.default.test", template="Hello default test!")
         self.assertEqual(p._state.db, "default")
 
-        # Verify it can be retrieved from default database
-        p_retrieved = LLMPrompt.objects.using("default").filter(id=p.id).first()
-        self.assertIsNotNone(p_retrieved)
-
-        # 2. PromptRun uses telemetry database
+        # 2. PromptRun uses default database
         pr = PromptRun.objects.create(
             purpose="test",
             prompt_text="Test prompt",
             response_text="Test response",
             model_name="test-model"
         )
-        self.assertEqual(pr._state.db, "telemetry")
+        self.assertEqual(pr._state.db, "default")
 
-        # Verify it is written to telemetry DB
-        pr_retrieved = PromptRun.objects.using("telemetry").filter(id=pr.id).first()
+        pr_retrieved = PromptRun.objects.filter(id=pr.id).first()
         self.assertIsNotNone(pr_retrieved)
-
-        # Verify it cannot be queried on default DB (table does not exist)
-        from django.db import OperationalError
-        try:
-            PromptRun.objects.using("default").filter(id=pr.id).first()
-            self.fail("Querying PromptRun on default DB should fail because the table does not exist.")
-        except OperationalError:
-            # Expected! The table is not migrated to default DB.
-            pass
 
     def test_prompt_registry_reads_from_default(self):
         from llm.models import LLMPrompt
@@ -485,7 +471,7 @@ class TelemetryDatabaseSeparationTestCase(TestCase):
 
 
 class LLMPromptVersioningTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     def test_copy_and_insert_versioning_on_template_edit(self):
         from llm.models import LLMPrompt
         from llm.prompts import PromptRegistry
@@ -537,7 +523,7 @@ class TestSchemaModel(BaseModel):
 
 
 class LLMGenericModelRoutingTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
 
     def test_pool_selection_and_priority(self):
         from llm.enums import LLMComplexity

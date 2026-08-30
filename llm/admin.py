@@ -55,10 +55,6 @@ class PromptRunAdmin(ModelAdmin):
     ordering = ('-created_at',)
     show_full_result_count = True
 
-    # Route all queries to the SQLite telemetry DB
-    def get_queryset(self, request):
-        return super().get_queryset(request).using('telemetry')
-
     # Telemetry is read-only — never allow add or edit, but DO allow view
     def has_add_permission(self, request):
         return False

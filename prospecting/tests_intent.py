@@ -24,7 +24,7 @@ def get_test_user():
 
 
 class ProspectingSpecificationTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     """Test case verifying schema validation and programmatic business rule checks."""
 
     def test_valid_specification(self):
@@ -75,7 +75,7 @@ class ProspectingSpecificationTestCase(TestCase):
 
 
 class ClarificationEngineTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     """Test case verifying missing critical fields detection."""
 
     def test_missing_critical_objective(self):
@@ -96,7 +96,7 @@ class ClarificationEngineTestCase(TestCase):
 
 
 class IntentParserTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     """Test case verifying parser service and JSON extraction logic."""
 
     @patch('llm.router.IntelligentRouter.generate')
@@ -168,7 +168,7 @@ class IntentParserTestCase(TestCase):
 
 
 class ServiceLifecycleTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     """Test case verifying request creation, updates, confirmations, and versioning immutabilities."""
 
     def setUp(self):
@@ -243,7 +243,7 @@ class ServiceLifecycleTestCase(TestCase):
 
 
 class APIEndpointsTestCase(APITestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     """Test case verifying all REST endpoints and status transition permissions."""
 
     def setUp(self):
@@ -346,7 +346,7 @@ class APIEndpointsTestCase(APITestCase):
 
 
 class IntegrationFlowTestCase(TestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     """Test case verifying end-to-end integration mapping from specifications to LeadCompany records."""
 
     def setUp(self):

@@ -15,7 +15,7 @@ class ProviderListAPIView(APIView):
 class LLMAnalyticsAPIView(APIView):
     def get(self, request):
         try:
-            runs = PromptRun.objects.using('telemetry').all().order_by('-created_at')
+            runs = PromptRun.objects.all().order_by('-created_at')
             
             aggregates = runs.aggregate(
                 total_calls=Count('id'),

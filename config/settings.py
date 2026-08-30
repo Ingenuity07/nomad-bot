@@ -363,8 +363,8 @@ import dj_database_url
 
 if 'test' in sys.argv:
     from django.test import TestCase, TransactionTestCase
-    TestCase.databases = {'default', 'telemetry'}
-    TransactionTestCase.databases = {'default', 'telemetry'}
+    TestCase.databases = {'default'}
+    TransactionTestCase.databases = {'default'}
     
     from django.db.backends.signals import connection_created
     from django.dispatch import receiver
@@ -384,13 +384,6 @@ if 'test' in sys.argv:
                 'timeout': 30000,
             }
         },
-        'telemetry': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db_telemetry.sqlite3',
-            'OPTIONS': {
-                'timeout': 30000,
-            }
-        }
     }
 else:
     database_url = os.environ.get("DATABASE_URL")
@@ -412,13 +405,9 @@ else:
 
     DATABASES = {
         'default': default_db_config,
-        'telemetry': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': os.environ.get('LLM_TELEMETRY_DB_PATH', str(BASE_DIR / 'llm_telemetry.sqlite3')),
-        }
     }
 
-DATABASE_ROUTERS = ['llm.routers.LLMTelemetryRouter']
+DATABASE_ROUTERS = []
 
 
 # Password validation

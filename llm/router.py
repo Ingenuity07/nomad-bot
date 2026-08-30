@@ -294,7 +294,7 @@ class IntelligentRouter(BaseLLMProvider):
             res_text = json.dumps({"tool_name": result.get("tool_name"), "tool_args": result.get("tool_args")})
 
         try:
-            PromptRun.objects.using('telemetry').create(
+            PromptRun.objects.create(
                 purpose=operation or "llm_generation",
                 prompt_text=prompt,
                 response_text=res_text,

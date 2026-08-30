@@ -19,7 +19,7 @@ from prospecting.models import (
 
 
 class DiscoveryRunAPITests(APITestCase):
-    databases = {'default', 'telemetry'}
+    databases = {'default'}
     def setUp(self):
         self.user = UserProfile.objects.create(
             username='discovery_run_api_user',
