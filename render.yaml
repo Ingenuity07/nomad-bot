@@ -24,6 +24,12 @@ services:
         value: "*"
       - key: DJANGO_SETTINGS_MODULE
         value: config.settings
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: APOLLO_API_KEY
+        sync: false
 
   # ---------------------------------------------------------------------------
   # 2. Remote Celery Worker Service #1 (Dual-Process: Worker + Health Server)
@@ -50,6 +56,12 @@ services:
           envVarKey: SECRET_KEY
       - key: DJANGO_SETTINGS_MODULE
         value: config.settings
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: APOLLO_API_KEY
+        sync: false
 
   # ---------------------------------------------------------------------------
   # 3. Remote Celery Worker Service #2 (Dual-Process: Worker + Health Server)
@@ -76,7 +88,12 @@ services:
           envVarKey: SECRET_KEY
       - key: DJANGO_SETTINGS_MODULE
         value: config.settings
-
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: APOLLO_API_KEY
+        sync: false
   # ---------------------------------------------------------------------------
   # 4. Redis / Key Value Message Broker
   # ---------------------------------------------------------------------------
