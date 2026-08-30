@@ -331,7 +331,10 @@ WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
 
 # Redis Configuration (Supports REDIS_URL for remote/production or REDIS_HOST for local)
-REDIS_URL = os.environ.get("REDIS_URL", "")
+REDIS_URL = os.environ.get("REDIS_URL", "").strip().strip("'").strip('"')
+if REDIS_URL.startswith("REDIS_URL="):
+    REDIS_URL = REDIS_URL[len("REDIS_URL="):].strip().strip("'").strip('"')
+
 redis_host = os.environ.get("REDIS_HOST", "127.0.0.1")
 
 if REDIS_URL:
@@ -386,7 +389,10 @@ if 'test' in sys.argv:
         },
     }
 else:
-    database_url = os.environ.get("DATABASE_URL")
+    database_url = os.environ.get("DATABASE_URL", "").strip().strip("'").strip('"')
+    if database_url.startswith("DATABASE_URL="):
+        database_url = database_url[len("DATABASE_URL="):].strip().strip("'").strip('"')
+
     if database_url:
         default_db_config = dj_database_url.parse(
             database_url,
