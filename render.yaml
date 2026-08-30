@@ -1,0 +1,86 @@
+services:
+  # ---------------------------------------------------------------------------
+  # 1. Django ASGI Web Application (HTTP & WebSockets via Daphne)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: nomad-bot-web
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: daphne -b 0.0.0.0 -p $PORT config.asgi:application
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: nomad-bot-redis
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: "*"
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings
+
+  # ---------------------------------------------------------------------------
+  # 2. Remote Celery Worker Service #1 (Dual-Process: Worker + Health Server)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: nomad-bot-worker-1
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: bash scripts/run_worker.sh
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: nomad-bot-redis
+          property: connectionString
+      - key: SECRET_KEY
+        fromService:
+          type: web
+          name: nomad-bot-web
+          envVarKey: SECRET_KEY
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings
+
+  # ---------------------------------------------------------------------------
+  # 3. Remote Celery Worker Service #2 (Dual-Process: Worker + Health Server)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: nomad-bot-worker-2
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: bash scripts/run_worker.sh
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: nomad-bot-redis
+          property: connectionString
+      - key: SECRET_KEY
+        fromService:
+          type: web
+          name: nomad-bot-web
+          envVarKey: SECRET_KEY
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings
+
+  # ---------------------------------------------------------------------------
+  # 4. Redis / Key Value Message Broker
+  # ---------------------------------------------------------------------------
+  - type: redis
+    name: nomad-bot-redis
+    plan: free
+    ipAllowList: [] # internal access only
