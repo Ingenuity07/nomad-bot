@@ -7,6 +7,9 @@ set -e
 
 echo "[run_worker.sh] Starting Celery worker dual-process supervisor..."
 
+# Ensure local telemetry database schema is initialized
+python manage.py migrate --database=telemetry --noinput 2>/dev/null || true
+
 # 1. Start lightweight HTTP health server
 python scripts/worker_health_server.py &
 HEALTH_PID=$!

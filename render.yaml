@@ -6,7 +6,7 @@ services:
     name: nomad-bot-web
     runtime: docker
     dockerfilePath: ./Dockerfile
-    dockerCommand: daphne -b 0.0.0.0 -p $PORT config.asgi:application
+    dockerCommand: sh -c "python manage.py migrate --noinput && python manage.py migrate --database=telemetry --noinput && daphne -b 0.0.0.0 -p $PORT config.asgi:application"
     plan: free
     envVars:
       - key: DATABASE_URL
