@@ -546,4 +546,11 @@ INSTAGRAM_TOKEN_ENCRYPTION_KEY = os.environ.get("INSTAGRAM_TOKEN_ENCRYPTION_KEY"
 INSTAGRAM_HTTP_TIMEOUT_SECONDS = int(os.environ.get("INSTAGRAM_HTTP_TIMEOUT_SECONDS", "15"))
 INSTAGRAM_MAX_RETRY_ATTEMPTS = int(os.environ.get("INSTAGRAM_MAX_RETRY_ATTEMPTS", "3"))
 
+# ── Remote Celery Worker Keep-Alive & Wake Configuration ─────────────────────
+WORKER_1_URL = os.environ.get("WORKER_1_URL", "http://127.0.0.1:10000").rstrip("/")
+WORKER_2_URL = os.environ.get("WORKER_2_URL", "http://127.0.0.1:10001").rstrip("/")
+WORKER_WAKE_TOKEN = os.environ.get("WORKER_WAKE_TOKEN", "").strip()
+WORKER_NAME = os.environ.get("WORKER_NAME", "").strip()
+
+
 

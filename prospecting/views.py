@@ -2386,3 +2386,97 @@ class ProspectingDiscoverStatusAPIView(APIView):
             "metrics": metrics_data
         }, status=status.HTTP_200_OK)
 
+
+# ==============================================================================
+# Remote Celery Worker START / STOP / STATUS Endpoints
+# ==============================================================================
+
+class WorkerStartAPIView(APIView):
+    """
+    POST /api/v3/prospecting/workers/start/
+    Enables worker runtime state in DB, issues wake pings to both Render workers,
+    and initiates periodic keep-alive tasks.
+    """
+    def post(self, request):
+        from django.conf import settings
+        from prospecting.models import WorkerRuntimeState
+        from prospecting.tasks import (
+            wake_all_remote_workers,
+            web_worker_keepalive_task,
+            worker_keepalive_task,
+        )
+
+        logger.info("[workers] START requested. Setting WorkerRuntimeState enabled=True in database...")
+        state = WorkerRuntimeState.set_enabled(True)
+        logger.info(f"[workers] WorkerRuntimeState updated to enabled=True at {state.updated_at}")
+
+        # Send HTTP wake requests to both workers
+        wake_results = wake_all_remote_workers()
+
+        # Schedule web keepalive loop
+        web_worker_keepalive_task.delay()
+
+        # Schedule worker-to-worker keepalive loops
+        w1_url = getattr(settings, "WORKER_1_URL", "")
+        w2_url = getattr(settings, "WORKER_2_URL", "")
+        if w2_url:
+            worker_keepalive_task.delay(target_worker_url=w2_url)
+        if w1_url:
+            worker_keepalive_task.delay(target_worker_url=w1_url)
+
+        w1_status = wake_results.get("worker_1", {})
+        w2_status = wake_results.get("worker_2", {})
+        w1_ok = w1_status.get("status") == "ok"
+        w2_ok = w2_status.get("status") == "ok"
+        all_ok = w1_ok and w2_ok
+
+        response_status = "started" if all_ok else "started_with_warnings"
+
+        return Response({
+            "status": response_status,
+            "enabled": True,
+            "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+            "started_at": state.started_at.isoformat() if state.started_at else None,
+            "worker_1_wake": w1_status,
+            "worker_2_wake": w2_status,
+        }, status=status.HTTP_200_OK)
+
+
+class WorkerStopAPIView(APIView):
+    """
+    POST /api/v3/prospecting/workers/stop/
+    Disables worker runtime state in DB. All keep-alive tasks check this state
+    and terminate immediately without sending further HTTP traffic.
+    """
+    def post(self, request):
+        from prospecting.models import WorkerRuntimeState
+
+        logger.info("[workers] STOP requested. Setting WorkerRuntimeState enabled=False in database...")
+        state = WorkerRuntimeState.set_enabled(False)
+        logger.info(f"[workers] WorkerRuntimeState updated to enabled=False at {state.updated_at}. All keep-alive traffic stopped.")
+
+        return Response({
+            "status": "stopped",
+            "enabled": False,
+            "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+            "stopped_at": state.stopped_at.isoformat() if state.stopped_at else None,
+        }, status=status.HTTP_200_OK)
+
+
+class WorkerStatusAPIView(APIView):
+    """
+    GET /api/v3/prospecting/workers/status/
+    Returns current worker runtime state from DB.
+    """
+    def get(self, request):
+        from prospecting.models import WorkerRuntimeState
+
+        state = WorkerRuntimeState.get_state()
+        return Response({
+            "enabled": state.enabled,
+            "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+            "started_at": state.started_at.isoformat() if state.started_at else None,
+            "stopped_at": state.stopped_at.isoformat() if state.stopped_at else None,
+        }, status=status.HTTP_200_OK)
+
+

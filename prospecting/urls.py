@@ -23,7 +23,8 @@ from .views import (
     ProspectingCampaignLeadsAPIView, ProspectingCampaignDiscoverMoreAPIView,
     DiscoveryRunListAPIView,
     DiscoveryRunDetailAPIView, DiscoveryRunLeadsAPIView,
-    DiscoveryRunTraceAPIView
+    DiscoveryRunTraceAPIView,
+    WorkerStartAPIView, WorkerStopAPIView, WorkerStatusAPIView
 )
 
 urlpatterns = [
@@ -77,4 +78,7 @@ urlpatterns = [
     path('reset/', ProspectingResetAPIView.as_view(), name='prospecting-reset'),
     path('signals/', ProblemSignalListCreateAPIView.as_view(), name='prospecting-signals-list'),
     path('signals/<uuid:pk>/', ProblemSignalDetailAPIView.as_view(), name='prospecting-signals-detail'),
+    path('workers/start/', WorkerStartAPIView.as_view(), name='worker-start'),
+    path('workers/stop/', WorkerStopAPIView.as_view(), name='worker-stop'),
+    path('workers/status/', WorkerStatusAPIView.as_view(), name='worker-status'),
 ]

@@ -18,6 +18,12 @@ services:
           property: connectionString
       - key: SECRET_KEY
         generateValue: true
+      - key: WORKER_WAKE_TOKEN
+        generateValue: true
+      - key: WORKER_1_URL
+        sync: false
+      - key: WORKER_2_URL
+        sync: false
       - key: DEBUG
         value: "False"
       - key: ALLOWED_HOSTS
@@ -42,6 +48,8 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
+      - key: WORKER_NAME
+        value: worker-1
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL
@@ -54,6 +62,15 @@ services:
           type: web
           name: nomad-bot-web
           envVarKey: SECRET_KEY
+      - key: WORKER_WAKE_TOKEN
+        fromService:
+          type: web
+          name: nomad-bot-web
+          envVarKey: WORKER_WAKE_TOKEN
+      - key: WORKER_1_URL
+        sync: false
+      - key: WORKER_2_URL
+        sync: false
       - key: DJANGO_SETTINGS_MODULE
         value: config.settings
       - key: GEMINI_API_KEY
@@ -74,6 +91,8 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
+      - key: WORKER_NAME
+        value: worker-2
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL
@@ -86,6 +105,15 @@ services:
           type: web
           name: nomad-bot-web
           envVarKey: SECRET_KEY
+      - key: WORKER_WAKE_TOKEN
+        fromService:
+          type: web
+          name: nomad-bot-web
+          envVarKey: WORKER_WAKE_TOKEN
+      - key: WORKER_1_URL
+        sync: false
+      - key: WORKER_2_URL
+        sync: false
       - key: DJANGO_SETTINGS_MODULE
         value: config.settings
       - key: GEMINI_API_KEY
@@ -94,6 +122,7 @@ services:
         sync: false
       - key: APOLLO_API_KEY
         sync: false
+
   # ---------------------------------------------------------------------------
   # 4. Redis / Key Value Message Broker
   # ---------------------------------------------------------------------------

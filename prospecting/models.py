@@ -770,3 +770,51 @@ class DiscoveryLead(models.Model):
     def __str__(self):
         return f"DiscoveryLead Link: Run {self.discovery_run.id} <-> Company {self.company.name}"
 
+
+class WorkerRuntimeState(models.Model):
+    """
+    Singleton model tracking the global on/off state of the remote Celery worker infrastructure.
+    """
+    id = models.IntegerField(primary_key=True, default=1)
+    enabled = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    stopped_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Worker Runtime State"
+        verbose_name_plural = "Worker Runtime State"
+
+    def __str__(self):
+        return f"WorkerRuntimeState(enabled={self.enabled}, updated_at={self.updated_at})"
+
+    def save(self, *args, **kwargs):
+        # Enforce singleton row constraint
+        self.id = 1
+        if self._state.adding and WorkerRuntimeState.objects.filter(id=1).exists():
+            existing = WorkerRuntimeState.objects.get(id=1)
+            existing.enabled = self.enabled
+            existing.started_at = self.started_at
+            existing.stopped_at = self.stopped_at
+            existing.save(*args, **kwargs)
+            return
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_state(cls) -> "WorkerRuntimeState":
+        obj, _ = cls.objects.get_or_create(id=1, defaults={"enabled": False})
+        return obj
+
+    @classmethod
+    def set_enabled(cls, enabled: bool) -> "WorkerRuntimeState":
+        from django.utils import timezone
+        state = cls.get_state()
+        state.enabled = enabled
+        if enabled:
+            state.started_at = timezone.now()
+        else:
+            state.stopped_at = timezone.now()
+        state.save()
+        return state
+
+

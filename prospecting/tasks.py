@@ -1347,3 +1347,136 @@ def discover_more_leads_async(run_id: str, batch_size: int = 10):
         logger.debug(f"Lock released for discover_more task: {lock_key}")
 
 
+# ==============================================================================
+# Remote Celery Worker Wake & Keep-Alive Infrastructure
+# ==============================================================================
+
+def send_worker_wake_ping(worker_url: str, timeout: float = 5.0) -> dict:
+    """
+    Sends an HTTP POST /wake request to a remote or local worker health server.
+    """
+    import requests
+    if not worker_url:
+        return {"status": "skipped", "reason": "No worker URL provided"}
+
+    wake_endpoint = f"{worker_url.rstrip('/')}/wake"
+    token = getattr(settings, "WORKER_WAKE_TOKEN", "")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Worker-Wake-Token"] = token
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = requests.post(wake_endpoint, json={"token": token}, headers=headers, timeout=timeout)
+        logger.info(f"[wake] Sent wake request to {wake_endpoint}. Response status: {response.status_code}")
+        return {
+            "status": "ok" if response.status_code == 200 else "failed",
+            "status_code": response.status_code,
+            "url": wake_endpoint,
+            "response": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text[:200]
+        }
+    except Exception as err:
+        logger.warning(f"[wake] Failed to wake worker at {wake_endpoint}: {err}")
+        return {
+            "status": "error",
+            "url": wake_endpoint,
+            "error": str(err)
+        }
+
+
+def wake_all_remote_workers() -> dict:
+    """
+    Sends wake requests to both configured remote worker URLs.
+    """
+    w1_url = getattr(settings, "WORKER_1_URL", "http://127.0.0.1:10000")
+    w2_url = getattr(settings, "WORKER_2_URL", "http://127.0.0.1:10001")
+
+    res1 = send_worker_wake_ping(w1_url)
+    res2 = send_worker_wake_ping(w2_url)
+
+    return {
+        "worker_1": res1,
+        "worker_2": res2
+    }
+
+
+@shared_task(name="prospecting.tasks.worker_keepalive_task")
+def worker_keepalive_task(target_worker_url: str = None):
+    """
+    Periodic worker-to-worker keep-alive task.
+    1. Reads WorkerRuntimeState from PostgreSQL.
+    2. If enabled=False: skips and stops generating further keep-alive requests.
+    3. If enabled=True: pings target worker and schedules next ping in 5-9 mins (randomized).
+    """
+    import random
+    from prospecting.models import WorkerRuntimeState
+
+    state = WorkerRuntimeState.get_state()
+    if not state.enabled:
+        logger.info("[keepalive] Worker keep-alive skipped because worker infrastructure is disabled (enabled=False).")
+        return {"status": "skipped", "reason": "disabled"}
+
+    # Determine target URL if not provided
+    if not target_worker_url:
+        worker_name = getattr(settings, "WORKER_NAME", "")
+        w1_url = getattr(settings, "WORKER_1_URL", "http://127.0.0.1:10000")
+        w2_url = getattr(settings, "WORKER_2_URL", "http://127.0.0.1:10001")
+        target_worker_url = w1_url if worker_name == "worker-2" else w2_url
+
+    logger.info(f"[keepalive] Worker keep-alive executing ping to {target_worker_url}...")
+    ping_result = send_worker_wake_ping(target_worker_url)
+
+    # Re-check state before scheduling next iteration
+    state = WorkerRuntimeState.get_state()
+    if state.enabled:
+        # Randomized interval between 5 and 9 minutes (300 to 540 seconds)
+        next_countdown = random.randint(300, 540)
+        logger.info(f"[keepalive] Scheduling next worker-to-worker keep-alive in {next_countdown}s (~{next_countdown//60}m) to {target_worker_url}.")
+        worker_keepalive_task.apply_async(kwargs={"target_worker_url": target_worker_url}, countdown=next_countdown)
+        return {
+            "status": "pinged",
+            "target": target_worker_url,
+            "ping_result": ping_result,
+            "next_countdown_seconds": next_countdown
+        }
+    else:
+        logger.info("[keepalive] Worker infrastructure was disabled after ping. Next keep-alive will not be scheduled.")
+        return {"status": "pinged", "target": target_worker_url, "rescheduled": False}
+
+
+@shared_task(name="prospecting.tasks.web_worker_keepalive_task")
+def web_worker_keepalive_task():
+    """
+    Periodic web-to-worker keep-alive task.
+    1. Reads WorkerRuntimeState from PostgreSQL.
+    2. If enabled=False: skips and stops generating further keep-alive requests.
+    3. If enabled=True: pings both workers and schedules next web ping in 8-9 mins (randomized).
+    """
+    import random
+    from prospecting.models import WorkerRuntimeState
+
+    state = WorkerRuntimeState.get_state()
+    if not state.enabled:
+        logger.info("[keepalive] Web keep-alive skipped because worker infrastructure is disabled (enabled=False).")
+        return {"status": "skipped", "reason": "disabled"}
+
+    logger.info("[keepalive] Web keep-alive executing ping to both workers...")
+    wake_results = wake_all_remote_workers()
+
+    state = WorkerRuntimeState.get_state()
+    if state.enabled:
+        # Randomized interval between 8 and 9 minutes (480 to 540 seconds)
+        next_countdown = random.randint(480, 540)
+        logger.info(f"[keepalive] Scheduling next web keep-alive in {next_countdown}s (~{next_countdown//60}m).")
+        web_worker_keepalive_task.apply_async(countdown=next_countdown)
+        return {
+            "status": "pinged",
+            "wake_results": wake_results,
+            "next_countdown_seconds": next_countdown
+        }
+    else:
+        logger.info("[keepalive] Worker infrastructure was disabled after web ping. Next web keep-alive will not be scheduled.")
+        return {"status": "pinged", "rescheduled": False}
+
+
+
