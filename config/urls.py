@@ -8,6 +8,8 @@ from drf_spectacular.views import (
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+from django.conf import settings
+from django.conf.urls.static import static
 
 def health_check_view(request):
     return JsonResponse({"status": "ok", "service": "django-web-health"})
@@ -34,4 +36,8 @@ urlpatterns = [
     
     # V3 REST Endpoints (Modular Apps)
     path('api/v3/prospecting/', include('prospecting.urls')),
+    path('api/v3/linkedin/', include('integrations.linkedin.urls')),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

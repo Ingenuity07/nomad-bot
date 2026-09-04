@@ -37,6 +37,17 @@ services:
       - key: APOLLO_API_KEY
         sync: false
 
+      - key: LINKEDIN_PUBLISH_WEBHOOK_URL
+        sync: false
+      - key: LINKEDIN_PUBLISH_WEBHOOK_SECRET
+        sync: false
+      - key: LINKEDIN_GENERATE_IMAGES
+        value: "False"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PUBLIC_BACKEND_URL
+        sync: false
+
   # ---------------------------------------------------------------------------
   # 2. Remote Celery Worker Service #1 (Dual-Process: Worker + Health Server)
   # ---------------------------------------------------------------------------
@@ -50,6 +61,8 @@ services:
     envVars:
       - key: WORKER_NAME
         value: worker-1
+      - key: RUN_CELERY_BEAT
+        value: "True"
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL
@@ -78,6 +91,16 @@ services:
       - key: GOOGLE_PLACES_API_KEY
         sync: false
       - key: APOLLO_API_KEY
+        sync: false
+      - key: LINKEDIN_PUBLISH_WEBHOOK_URL
+        sync: false
+      - key: LINKEDIN_PUBLISH_WEBHOOK_SECRET
+        sync: false
+      - key: LINKEDIN_GENERATE_IMAGES
+        value: "False"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PUBLIC_BACKEND_URL
         sync: false
 
   # ---------------------------------------------------------------------------
@@ -121,6 +144,16 @@ services:
       - key: GOOGLE_PLACES_API_KEY
         sync: false
       - key: APOLLO_API_KEY
+        sync: false
+      - key: LINKEDIN_PUBLISH_WEBHOOK_URL
+        sync: false
+      - key: LINKEDIN_PUBLISH_WEBHOOK_SECRET
+        sync: false
+      - key: LINKEDIN_GENERATE_IMAGES
+        value: "False"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PUBLIC_BACKEND_URL
         sync: false
 
   # ---------------------------------------------------------------------------

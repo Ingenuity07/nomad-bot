@@ -123,6 +123,10 @@ Validate that the setup is fully correct by executing the test suite:
 python manage.py test prospecting llm knowledge_base
 ```
 
+## LinkedIn content automation
+
+The repository includes a configuration-driven LinkedIn Studio with reusable brand memory, AI copy and hashtag generation, optional image generation, approval workflow, timezone-aware scheduling, and signed webhook delivery to an approved posting provider. See [docs/LINKEDIN_AUTOMATION.md](docs/LINKEDIN_AUTOMATION.md) for setup and the provider payload contract.
+
 # 🧠 Nomad Bot — Complete Architecture Documentation
 
 > **Version:** V3.5 | **Stack:** Django 6 · LangGraph · Celery · Redis · Supabase (PostgreSQL) · SQLite (Telemetry) · Django Channels (WebSocket)

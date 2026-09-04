@@ -17,6 +17,13 @@ celery -A config worker --loglevel=INFO --concurrency=1 &
 CELERY_PID=$!
 echo "[run_worker.sh] Celery worker started with PID: $CELERY_PID"
 
+BEAT_PID=""
+if [ "${RUN_CELERY_BEAT:-False}" = "True" ]; then
+    celery -A config beat --loglevel=INFO &
+    BEAT_PID=$!
+    echo "[run_worker.sh] Celery beat started with PID: $BEAT_PID"
+fi
+
 # Graceful termination handler
 cleanup() {
     echo "[run_worker.sh] Termination signal received. Stopping child processes..."
@@ -27,6 +34,11 @@ cleanup() {
     if kill -0 "$HEALTH_PID" 2>/dev/null; then
         echo "[run_worker.sh] Sending SIGTERM to HTTP health server (PID: $HEALTH_PID)..."
         kill -TERM "$HEALTH_PID" 2>/dev/null || true
+    fi
+    if [ -n "$BEAT_PID" ] && kill -0 "$BEAT_PID" 2>/dev/null; then
+        echo "[run_worker.sh] Sending SIGTERM to Celery beat (PID: $BEAT_PID)..."
+        kill -TERM "$BEAT_PID" 2>/dev/null || true
+        wait "$BEAT_PID" 2>/dev/null || true
     fi
     wait "$CELERY_PID" 2>/dev/null || true
     wait "$HEALTH_PID" 2>/dev/null || true
@@ -56,6 +68,13 @@ while true; do
             kill -TERM "$HEALTH_PID" 2>/dev/null || true
             wait "$HEALTH_PID" 2>/dev/null || true
         fi
+        exit 1
+    fi
+
+    if [ -n "$BEAT_PID" ] && ! kill -0 "$BEAT_PID" 2>/dev/null; then
+        echo "[run_worker.sh] ERROR: Celery beat (PID: $BEAT_PID) exited unexpectedly!"
+        kill -TERM "$CELERY_PID" 2>/dev/null || true
+        kill -TERM "$HEALTH_PID" 2>/dev/null || true
         exit 1
     fi
 

@@ -82,6 +82,7 @@ INSTALLED_APPS = [
     'knowledge_base',
     'prospecting',
     'integrations.instagram',
+    'integrations.linkedin',
 ]
 
 MIDDLEWARE = [
@@ -451,6 +452,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Per-run discovery observability. Each run gets a JSON trace plus a
 # self-contained HTML viewer in this directory.
@@ -467,6 +470,16 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
 CELERY_TASK_ALWAYS_EAGER = 'test' in sys.argv
 CELERY_TASK_EAGER_PROPAGATES = CELERY_TASK_ALWAYS_EAGER
+CELERY_BEAT_SCHEDULE = {
+    'linkedin-fill-content-queues': {
+        'task': 'linkedin.fill_content_queues',
+        'schedule': 60 * 60,
+    },
+    'linkedin-publish-due-posts': {
+        'task': 'linkedin.publish_due_posts',
+        'schedule': 60,
+    },
+}
 
 
 # Cache backend (Redis) for distributed task locking
@@ -545,6 +558,17 @@ INSTAGRAM_GRAPH_API_VERSION = os.environ.get("INSTAGRAM_GRAPH_API_VERSION", "v21
 INSTAGRAM_TOKEN_ENCRYPTION_KEY = os.environ.get("INSTAGRAM_TOKEN_ENCRYPTION_KEY", "")
 INSTAGRAM_HTTP_TIMEOUT_SECONDS = int(os.environ.get("INSTAGRAM_HTTP_TIMEOUT_SECONDS", "15"))
 INSTAGRAM_MAX_RETRY_ATTEMPTS = int(os.environ.get("INSTAGRAM_MAX_RETRY_ATTEMPTS", "3"))
+
+# ── LinkedIn Content Automation ─────────────────────────────────────────────
+# Direct LinkedIn posting is intentionally not performed here. Configure an
+# approved social scheduler (Buffer, Make, Zapier, n8n, etc.) as a webhook.
+LINKEDIN_PUBLISH_WEBHOOK_URL = os.environ.get("LINKEDIN_PUBLISH_WEBHOOK_URL", "").strip()
+LINKEDIN_PUBLISH_WEBHOOK_SECRET = os.environ.get("LINKEDIN_PUBLISH_WEBHOOK_SECRET", "").strip()
+LINKEDIN_HTTP_TIMEOUT_SECONDS = int(os.environ.get("LINKEDIN_HTTP_TIMEOUT_SECONDS", "60"))
+LINKEDIN_GENERATE_IMAGES = os.environ.get("LINKEDIN_GENERATE_IMAGES", "False").lower() in ("true", "1", "yes")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5").strip()
+PUBLIC_BACKEND_URL = os.environ.get("PUBLIC_BACKEND_URL", "http://localhost:8000").strip().rstrip("/")
 
 # ── Remote Celery Worker Keep-Alive & Wake Configuration ─────────────────────
 WORKER_1_URL = os.environ.get("WORKER_1_URL", "http://127.0.0.1:10000").rstrip("/")
