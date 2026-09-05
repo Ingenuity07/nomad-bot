@@ -5,6 +5,7 @@ from .models import ContentBrief, LinkedInAutomationSettings, LinkedInPost
 
 class LinkedInAutomationSettingsSerializer(serializers.ModelSerializer):
     provider_ready = serializers.SerializerMethodField()
+    image_provider_ready = serializers.SerializerMethodField()
 
     class Meta:
         model = LinkedInAutomationSettings
@@ -13,9 +14,9 @@ class LinkedInAutomationSettingsSerializer(serializers.ModelSerializer):
             "content_pillars", "calls_to_action", "forbidden_topics", "image_style",
             "language", "timezone", "schedule_days", "post_time", "posts_per_week",
             "queue_horizon_days", "approval_mode", "publisher", "is_active",
-            "provider_ready", "created_at", "updated_at",
+            "provider_ready", "image_provider_ready", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "provider_ready", "created_at", "updated_at"]
+        read_only_fields = ["id", "provider_ready", "image_provider_ready", "created_at", "updated_at"]
 
     def validate_schedule_days(self, value):
         if not isinstance(value, list) or any(not isinstance(day, int) or day < 0 or day > 6 for day in value):
@@ -31,6 +32,11 @@ class LinkedInAutomationSettingsSerializer(serializers.ModelSerializer):
         from .services.publishers import publisher_status
 
         return publisher_status(obj)
+
+    def get_image_provider_ready(self, obj):
+        from .services.images import image_provider_status
+
+        return image_provider_status()
 
 
 class ContentBriefSerializer(serializers.ModelSerializer):
@@ -60,4 +66,3 @@ class LinkedInPostSerializer(serializers.ModelSerializer):
     def get_character_count(self, obj):
         tags = " ".join(obj.hashtags)
         return len(f"{obj.body}\n\n{tags}".strip())
-

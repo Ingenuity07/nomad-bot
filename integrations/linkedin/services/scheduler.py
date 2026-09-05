@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from ..models import ContentBrief, LinkedInAutomationSettings, LinkedInPost
 from .content import LinkedInContentGenerator
-from .images import OpenAIImageGenerator
+from .images import LinkedInImageGenerator
 
 
 def _zone(name):
@@ -63,11 +63,12 @@ def generate_post(settings, brief=None, scheduled_for=None, generator=None, imag
         generation_metadata={"provider": content.provider, "model": content.model},
     )
     try:
-        image_url, metadata, image_data = (image_generator or OpenAIImageGenerator()).generate(post.id, content.image_prompt)
+        image_url, metadata, image_data = (image_generator or LinkedInImageGenerator()).generate(post.id, content.image_prompt)
         post.image_url = image_url
         post.image_data = image_data
+        post.image_content_type = metadata.get("content_type", "image/png")
         post.generation_metadata = {**post.generation_metadata, "image": metadata}
-        post.save(update_fields=["image_url", "image_data", "generation_metadata", "updated_at"])
+        post.save(update_fields=["image_url", "image_data", "image_content_type", "generation_metadata", "updated_at"])
     except Exception as exc:
         post.generation_metadata = {**post.generation_metadata, "image": {"status": "failed", "message": str(exc)}}
         post.save(update_fields=["generation_metadata", "updated_at"])

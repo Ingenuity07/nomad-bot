@@ -1,8 +1,12 @@
+import hashlib
+import hmac
+import json
+import base64
 from datetime import datetime, time
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -11,7 +15,10 @@ from prospecting.models import Workspace
 
 from .models import ContentBrief, LinkedInAutomationSettings, LinkedInPost
 from .services.content import GeneratedPostContent, LinkedInContentGenerator
+from .services.images import LinkedInImageGenerator
+from .services.publishers import BufferPublisher
 from .services.scheduler import generate_post, upcoming_slots
+from .tasks import publish_post, sync_submitted_posts
 
 
 class LinkedInSchedulerTests(TestCase):
@@ -76,6 +83,36 @@ class LinkedInContentGeneratorTests(TestCase):
         self.assertTrue(result.hashtags)
 
 
+class LinkedInImageGeneratorTests(TestCase):
+    @override_settings(
+        LINKEDIN_GENERATE_IMAGES=True,
+        LINKEDIN_IMAGE_PROVIDER="gemini",
+        GEMINI_API_KEY="gemini-key",
+        GEMINI_IMAGE_MODEL="gemini-3.1-flash-image",
+        GEMINI_IMAGE_SIZE="1K",
+    )
+    @patch("integrations.linkedin.services.images.requests.post")
+    def test_gemini_generates_four_by_five_feed_image(self, request_post):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"inlineData": {
+                "mimeType": "image/png",
+                "data": base64.b64encode(b"image-bytes").decode("ascii"),
+            }}]}}],
+        }
+        request_post.return_value = response
+
+        url, metadata, image_data = LinkedInImageGenerator().generate("post-id", "A bridge representing trust")
+
+        payload = request_post.call_args.kwargs["json"]
+        self.assertEqual(payload["generationConfig"]["responseFormat"]["image"]["aspectRatio"], "4:5")
+        self.assertIn("single clear focal concept", payload["contents"][0]["parts"][0]["text"])
+        self.assertEqual(image_data, b"image-bytes")
+        self.assertEqual(metadata["provider"], "gemini")
+        self.assertIn("post-id", url)
+
+
 class LinkedInAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -83,7 +120,7 @@ class LinkedInAPITests(TestCase):
     def test_dashboard_bootstraps_configuration(self):
         response = self.client.get(reverse("linkedin-dashboard"))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["settings"]["page_name"], "Route Floww")
+        self.assertEqual(response.data["settings"]["page_name"], "Your business")
 
     def test_configuration_can_be_updated(self):
         response = self.client.put(
@@ -122,3 +159,122 @@ class LinkedInAPITests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"png-bytes")
         self.assertEqual(response["Content-Type"], "image/png")
+
+    @override_settings(N8N_LINKEDIN_WEBHOOK_SECRET="callback-secret")
+    def test_signed_publisher_callback_confirms_publication(self):
+        self.client.get(reverse("linkedin-dashboard"))
+        settings = LinkedInAutomationSettings.objects.get(workspace__name="Default Workspace")
+        post = LinkedInPost.objects.create(
+            settings=settings,
+            topic="Callback test",
+            body="Test body",
+            scheduled_for=timezone.now(),
+            status=LinkedInPost.SUBMITTED,
+        )
+        body = json.dumps({
+            "idempotency_key": str(post.id),
+            "external_post_id": "linkedin-post-id",
+            "status": "published",
+        }).encode("utf-8")
+        signature = hmac.new(b"callback-secret", body, hashlib.sha256).hexdigest()
+
+        response = self.client.post(
+            reverse("linkedin-publisher-callback"),
+            data=body,
+            content_type="application/json",
+            HTTP_X_NOMAD_SIGNATURE=signature,
+        )
+
+        post.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.status, LinkedInPost.PUBLISHED)
+        self.assertEqual(post.external_post_id, "linkedin-post-id")
+
+    @patch("integrations.linkedin.views.LinkedInImageGenerator.generate")
+    def test_draft_image_can_be_regenerated(self, generate_image):
+        self.client.get(reverse("linkedin-dashboard"))
+        settings = LinkedInAutomationSettings.objects.get(workspace__name="Default Workspace")
+        post = LinkedInPost.objects.create(
+            settings=settings,
+            topic="Image refresh",
+            body="Test body",
+            image_prompt="One strong visual metaphor",
+            scheduled_for=timezone.now(),
+        )
+        generate_image.return_value = (
+            f"https://example.com/{post.id}.png",
+            {"status": "generated", "provider": "gemini", "content_type": "image/png"},
+            b"new-image",
+        )
+
+        response = self.client.post(reverse("linkedin-regenerate-image", args=[post.id]), format="json")
+
+        post.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(bytes(post.image_data), b"new-image")
+        self.assertEqual(post.generation_metadata["image"]["provider"], "gemini")
+
+
+class LinkedInPublisherTests(TestCase):
+    def setUp(self):
+        workspace = Workspace.objects.create(name="Publisher Workspace")
+        self.settings = LinkedInAutomationSettings.objects.create(
+            workspace=workspace,
+            publisher=LinkedInAutomationSettings.BUFFER,
+        )
+        self.post = LinkedInPost.objects.create(
+            settings=self.settings,
+            topic="Publisher test",
+            body="A useful route planning idea.",
+            hashtags=["#Logistics"],
+            image_url="https://cdn.example.com/post.png",
+            scheduled_for=timezone.now(),
+            status=LinkedInPost.PUBLISHING,
+        )
+
+    @override_settings(BUFFER_API_KEY="buffer-key", BUFFER_CHANNEL_ID="linkedin-channel")
+    @patch("integrations.linkedin.services.publishers.requests.post")
+    def test_buffer_submission_uses_linkedin_channel_and_image(self, request_post):
+        response = Mock()
+        response.json.return_value = {"data": {"createPost": {"post": {"id": "buffer-post-1"}}}}
+        response.raise_for_status.return_value = None
+        request_post.return_value = response
+
+        result = BufferPublisher().publish(self.post)
+
+        self.assertEqual(result.state, "SUBMITTED")
+        sent_input = request_post.call_args.kwargs["json"]["variables"]["input"]
+        self.assertEqual(sent_input["channelId"], "linkedin-channel")
+        self.assertEqual(sent_input["mode"], "shareNow")
+        self.assertEqual(sent_input["assets"][0]["image"]["url"], self.post.image_url)
+
+    @override_settings(BUFFER_API_KEY="buffer-key", BUFFER_CHANNEL_ID="linkedin-channel")
+    @patch("integrations.linkedin.services.publishers.requests.post")
+    def test_submission_is_not_marked_published_until_buffer_confirms(self, request_post):
+        response = Mock()
+        response.json.return_value = {"data": {"createPost": {"post": {"id": "buffer-post-2"}}}}
+        response.raise_for_status.return_value = None
+        request_post.return_value = response
+
+        publish_post(self.post)
+
+        self.assertEqual(self.post.status, LinkedInPost.SUBMITTED)
+        self.assertIsNone(self.post.published_at)
+
+    @override_settings(BUFFER_API_KEY="buffer-key", BUFFER_CHANNEL_ID="linkedin-channel")
+    @patch("integrations.linkedin.services.publishers.requests.post")
+    def test_buffer_sync_marks_sent_post_published(self, request_post):
+        self.post.status = LinkedInPost.SUBMITTED
+        self.post.external_post_id = "buffer-post-3"
+        self.post.save()
+        response = Mock()
+        response.json.return_value = {"data": {"post": {"id": "buffer-post-3", "status": "sent"}}}
+        response.raise_for_status.return_value = None
+        request_post.return_value = response
+
+        result = sync_submitted_posts()
+
+        self.post.refresh_from_db()
+        self.assertEqual(result["published"], 1)
+        self.assertEqual(self.post.status, LinkedInPost.PUBLISHED)
+        self.assertIsNotNone(self.post.published_at)

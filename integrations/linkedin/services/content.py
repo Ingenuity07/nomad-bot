@@ -23,9 +23,9 @@ class LinkedInContentGenerator:
     """Turns reusable brand context into a complete LinkedIn post package."""
 
     system_prompt = (
-        "You are a senior B2B LinkedIn editor. Return one original post as strict JSON only. "
+        "You are a senior LinkedIn editor and visual creative director for business Pages. Return one original post as strict JSON only. "
         "Never invent customer results, statistics, partnerships, or product capabilities. "
-        "Keep the post useful, human, scannable, and below 2,700 characters."
+        "Keep the post useful, human, scannable, and below 2,700 characters. Avoid generic motivational writing and AI clichés."
     )
 
     def __init__(self, router=None):
@@ -51,7 +51,7 @@ class LinkedInContentGenerator:
 
     def _prompt(self, settings, brief, sequence):
         return f"""
-Create post variation {sequence} for the LinkedIn Page {settings.page_name}.
+Create post variation {sequence} for the LinkedIn Company Page {settings.page_name or 'the business'}.
 
 Company: {settings.company_description}
 Audience: {settings.audience}
@@ -69,7 +69,7 @@ Return exactly this JSON shape:
   "hook": "strong first line",
   "body": "complete post with short paragraphs; do not append hashtags",
   "hashtags": ["#Three", "#To", "#FiveTags"],
-  "image_prompt": "standalone prompt for a 4:5 professional branded image with no text or logos",
+  "image_prompt": "a concrete standalone art direction for one 4:5 feed image: name the main subject, visual metaphor, composition, setting, lighting, palette, camera/viewpoint and medium. Tie it directly to the post's core idea. Avoid generic office scenes, handshakes, floating dashboards and stock-photo clichés. Include no text or logos",
   "alt_text": "accessible description of the planned image"
 }}
 """.strip()
@@ -99,7 +99,7 @@ Return exactly this JSON shape:
             tag = re.sub(r"[^A-Za-z0-9_]", "", str(item).lstrip("#"))
             if tag:
                 tags.append(f"#{tag}")
-        return tags or ["#Logistics", "#RoutePlanning", "#Operations"]
+        return tags or ["#Business", "#IndustryInsights", "#Leadership"]
 
     def _fallback(self, settings, brief, sequence):
         pillar = settings.content_pillars[(sequence - 1) % len(settings.content_pillars)] if settings.content_pillars else "better daily operations"
@@ -115,8 +115,20 @@ Return exactly this JSON shape:
             topic=(brief.label or pillar.title())[:255],
             hook=hook,
             body=body[:2700],
-            hashtags=["#Logistics", "#RoutePlanning", "#Operations"],
-            image_prompt=f"{settings.image_style}. Visual concept about {pillar}. 4:5 portrait, no text, no logos.",
-            alt_text=f"Editorial illustration representing {pillar}.",
+            hashtags=self._fallback_hashtags(settings, pillar),
+            image_prompt=(
+                f"{settings.image_style}. One concrete visual metaphor for {pillar}: a single central subject showing a clear before-to-after transition, "
+                "simple background, deliberate lighting, strong visual hierarchy, 4:5 portrait composition, no text, no logos, no interface screens."
+            ),
+            alt_text=f"Editorial image representing {pillar} for {settings.page_name or 'the business'}.",
         )
 
+    @staticmethod
+    def _fallback_hashtags(settings, pillar):
+        candidates = [pillar, *(settings.content_pillars or [])[:2], "BusinessInsights"]
+        tags = []
+        for value in candidates:
+            tag = re.sub(r"[^A-Za-z0-9]", "", str(value).title())
+            if tag and f"#{tag}" not in tags:
+                tags.append(f"#{tag}")
+        return tags[:4] or ["#Business", "#IndustryInsights"]

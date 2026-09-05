@@ -479,6 +479,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'linkedin.publish_due_posts',
         'schedule': 60,
     },
+    'linkedin-sync-submitted-posts': {
+        'task': 'linkedin.sync_submitted_posts',
+        'schedule': 5 * 60,
+    },
 }
 
 
@@ -560,14 +564,26 @@ INSTAGRAM_HTTP_TIMEOUT_SECONDS = int(os.environ.get("INSTAGRAM_HTTP_TIMEOUT_SECO
 INSTAGRAM_MAX_RETRY_ATTEMPTS = int(os.environ.get("INSTAGRAM_MAX_RETRY_ATTEMPTS", "3"))
 
 # ── LinkedIn Content Automation ─────────────────────────────────────────────
-# Direct LinkedIn posting is intentionally not performed here. Configure an
-# approved social scheduler (Buffer, Make, Zapier, n8n, etc.) as a webhook.
+# Buffer is the preferred Company Page publisher. n8n is supported as a signed
+# workflow handoff; it still needs either Buffer or an eligible LinkedIn app.
+BUFFER_API_URL = os.environ.get("BUFFER_API_URL", "https://api.buffer.com").strip()
+BUFFER_API_KEY = os.environ.get("BUFFER_API_KEY", "").strip()
+BUFFER_CHANNEL_ID = os.environ.get("BUFFER_CHANNEL_ID", "").strip()
+N8N_LINKEDIN_WEBHOOK_URL = os.environ.get("N8N_LINKEDIN_WEBHOOK_URL", "").strip()
+N8N_LINKEDIN_WEBHOOK_SECRET = os.environ.get("N8N_LINKEDIN_WEBHOOK_SECRET", "").strip()
+N8N_LINKEDIN_TARGET = os.environ.get("N8N_LINKEDIN_TARGET", "PERSON").strip().upper()
+# Kept for existing installations using the original generic webhook mode.
 LINKEDIN_PUBLISH_WEBHOOK_URL = os.environ.get("LINKEDIN_PUBLISH_WEBHOOK_URL", "").strip()
 LINKEDIN_PUBLISH_WEBHOOK_SECRET = os.environ.get("LINKEDIN_PUBLISH_WEBHOOK_SECRET", "").strip()
 LINKEDIN_HTTP_TIMEOUT_SECONDS = int(os.environ.get("LINKEDIN_HTTP_TIMEOUT_SECONDS", "60"))
 LINKEDIN_GENERATE_IMAGES = os.environ.get("LINKEDIN_GENERATE_IMAGES", "False").lower() in ("true", "1", "yes")
+LINKEDIN_IMAGE_PROVIDER = os.environ.get("LINKEDIN_IMAGE_PROVIDER", "auto").strip().lower()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image").strip()
+GEMINI_IMAGE_SIZE = os.environ.get("GEMINI_IMAGE_SIZE", "1K").strip().upper()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5").strip()
+OPENAI_IMAGE_QUALITY = os.environ.get("OPENAI_IMAGE_QUALITY", "high").strip().lower()
 PUBLIC_BACKEND_URL = os.environ.get("PUBLIC_BACKEND_URL", "http://localhost:8000").strip().rstrip("/")
 
 # ── Remote Celery Worker Keep-Alive & Wake Configuration ─────────────────────

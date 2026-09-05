@@ -15,10 +15,14 @@ class LinkedInAutomationSettings(models.Model):
     ]
 
     MANUAL = "MANUAL"
+    BUFFER = "BUFFER"
+    N8N = "N8N"
     WEBHOOK = "WEBHOOK"
     PUBLISHER_CHOICES = [
         (MANUAL, "Manual handoff"),
-        (WEBHOOK, "Approved provider webhook"),
+        (BUFFER, "Buffer"),
+        (N8N, "n8n workflow"),
+        (WEBHOOK, "Legacy provider webhook"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -27,14 +31,14 @@ class LinkedInAutomationSettings(models.Model):
         on_delete=models.CASCADE,
         related_name="linkedin_automation_settings",
     )
-    page_name = models.CharField(max_length=255, default="Route Floww")
+    page_name = models.CharField(max_length=255, default="Your business")
     company_description = models.TextField(blank=True, default="")
     audience = models.TextField(blank=True, default="")
-    brand_voice = models.CharField(max_length=255, default="Clear, practical and optimistic")
+    brand_voice = models.CharField(max_length=255, default="Clear, credible and human")
     content_pillars = models.JSONField(default=list, blank=True)
     calls_to_action = models.JSONField(default=list, blank=True)
     forbidden_topics = models.JSONField(default=list, blank=True)
-    image_style = models.TextField(blank=True, default="Editorial illustration, clean shapes, brand green accents")
+    image_style = models.TextField(blank=True, default="Premium editorial photography or refined 3D illustration, simple composition, brand-aligned colors")
     language = models.CharField(max_length=50, default="English")
     timezone = models.CharField(max_length=100, default="Asia/Kolkata")
     schedule_days = models.JSONField(default=list, blank=True)
@@ -88,6 +92,7 @@ class LinkedInPost(models.Model):
     SCHEDULED = "SCHEDULED"
     READY = "READY"
     PUBLISHING = "PUBLISHING"
+    SUBMITTED = "SUBMITTED"
     PUBLISHED = "PUBLISHED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -96,6 +101,7 @@ class LinkedInPost(models.Model):
         (SCHEDULED, "Scheduled"),
         (READY, "Ready for manual posting"),
         (PUBLISHING, "Publishing"),
+        (SUBMITTED, "Sent to publisher"),
         (PUBLISHED, "Published"),
         (FAILED, "Failed"),
         (CANCELLED, "Cancelled"),
