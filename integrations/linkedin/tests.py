@@ -106,11 +106,29 @@ class LinkedInImageGeneratorTests(TestCase):
         url, metadata, image_data = LinkedInImageGenerator().generate("post-id", "A bridge representing trust")
 
         payload = request_post.call_args.kwargs["json"]
-        self.assertEqual(payload["generationConfig"]["responseFormat"]["image"]["aspectRatio"], "4:5")
+        image_format = payload["generationConfig"]["responseFormat"]["image"]
+        self.assertEqual(image_format["aspectRatio"], "ASPECT_RATIO_FOUR_BY_FIVE")
+        self.assertEqual(image_format["imageSize"], "IMAGE_SIZE_ONE_K")
         self.assertIn("single clear focal concept", payload["contents"][0]["parts"][0]["text"])
         self.assertEqual(image_data, b"image-bytes")
         self.assertEqual(metadata["provider"], "gemini")
         self.assertIn("post-id", url)
+
+    @override_settings(
+        LINKEDIN_GENERATE_IMAGES=True,
+        LINKEDIN_IMAGE_PROVIDER="gemini",
+        GEMINI_API_KEY="gemini-key",
+        GEMINI_IMAGE_MODEL="gemini-3.1-flash-image",
+    )
+    @patch("integrations.linkedin.services.images.requests.post")
+    def test_gemini_quota_error_is_actionable(self, request_post):
+        response = Mock(status_code=429)
+        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+        response.json.return_value = {"error": {"message": "Quota exceeded"}}
+        request_post.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, "Enable billing or increase"):
+            LinkedInImageGenerator().generate("post-id", "A delivery route")
 
 
 class LinkedInAPITests(TestCase):

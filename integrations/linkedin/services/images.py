@@ -4,6 +4,33 @@ import requests
 from django.conf import settings
 
 
+GEMINI_ASPECT_RATIOS = {
+    "4:5": "ASPECT_RATIO_FOUR_BY_FIVE",
+}
+GEMINI_IMAGE_SIZES = {
+    "512": "IMAGE_SIZE_FIVE_TWELVE",
+    "1K": "IMAGE_SIZE_ONE_K",
+    "2K": "IMAGE_SIZE_TWO_K",
+    "4K": "IMAGE_SIZE_FOUR_K",
+}
+
+
+def _raise_provider_error(response, provider):
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        try:
+            message = response.json().get("error", {}).get("message", "")
+        except (TypeError, ValueError):
+            message = ""
+        if response.status_code == 429:
+            raise RuntimeError(
+                f"{provider} image quota is unavailable. Enable billing or increase the image-model quota, then try again."
+            ) from exc
+        detail = f": {message}" if message else ""
+        raise RuntimeError(f"{provider} image request failed ({response.status_code}){detail}") from exc
+
+
 def image_provider_status():
     if not settings.LINKEDIN_GENERATE_IMAGES:
         return {"ready": False, "label": "Image generation is off", "detail": "Set LINKEDIN_GENERATE_IMAGES=True"}
@@ -77,12 +104,15 @@ Return only the final image.
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
                     "responseModalities": ["IMAGE"],
-                    "responseFormat": {"image": {"aspectRatio": "4:5", "imageSize": settings.GEMINI_IMAGE_SIZE}},
+                    "responseFormat": {"image": {
+                        "aspectRatio": GEMINI_ASPECT_RATIOS["4:5"],
+                        "imageSize": GEMINI_IMAGE_SIZES.get(settings.GEMINI_IMAGE_SIZE, "IMAGE_SIZE_ONE_K"),
+                    }},
                 },
             },
             timeout=settings.LINKEDIN_HTTP_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
+        _raise_provider_error(response, "Gemini")
         data = response.json()
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         image_part = next((item.get("inlineData") or item.get("inline_data") for item in parts if item.get("inlineData") or item.get("inline_data")), None)
@@ -105,11 +135,11 @@ Return only the final image.
             },
             timeout=settings.LINKEDIN_HTTP_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
+        _raise_provider_error(response, "OpenAI")
         item = response.json()["data"][0]
         if item.get("url"):
             image_response = requests.get(item["url"], timeout=settings.LINKEDIN_HTTP_TIMEOUT_SECONDS)
-            image_response.raise_for_status()
+            _raise_provider_error(image_response, "OpenAI image download")
             raw_bytes = image_response.content
         else:
             raw = item.get("b64_json")
