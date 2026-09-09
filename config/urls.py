@@ -37,6 +37,8 @@ urlpatterns = [
     # V3 REST Endpoints (Modular Apps)
     path('api/v3/prospecting/', include('prospecting.urls')),
     path('api/v3/linkedin/', include('integrations.linkedin.urls')),
+    path('api/v3/social/', include('integrations.social.public_urls')),
+    path('api/internal/social/', include('integrations.social.urls')),
 ]
 
 if settings.DEBUG:

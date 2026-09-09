@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 from knowledge_base.models import UserProfile
 
@@ -12,6 +13,55 @@ class Workspace(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class WorkspaceMembership(models.Model):
+    OWNER = "OWNER"
+    ADMIN = "ADMIN"
+    MEMBER = "MEMBER"
+    ROLE_CHOICES = [
+        (OWNER, "Owner"),
+        (ADMIN, "Admin"),
+        (MEMBER, "Member"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="workspace_memberships",
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=MEMBER)
+    is_active = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "user"],
+                name="unique_workspace_membership",
+            ),
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=models.Q(is_active=True),
+                name="unique_active_workspace_per_user",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["user", "is_active"],
+                name="prospecting_user_id_1fc777_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user} in {self.workspace} ({self.role})"
 
 
 def get_default_workspace():

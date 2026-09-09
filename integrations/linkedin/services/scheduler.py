@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.db import transaction
 from django.utils import timezone
 
+from integrations.social.services.linkedin_compat import sync_post
+
 from ..models import ContentBrief, LinkedInAutomationSettings, LinkedInPost
 from .content import LinkedInContentGenerator
 from .images import LinkedInImageGenerator
@@ -16,6 +18,15 @@ def _zone(name):
         return ZoneInfo("UTC")
 
 
+def _valid_local_slot(day, post_time, zone):
+    """Return the first DST fold, or None when the wall time does not exist."""
+    candidate = datetime.combine(day, post_time, tzinfo=zone).replace(fold=0)
+    round_trip = candidate.astimezone(ZoneInfo("UTC")).astimezone(zone)
+    if round_trip.date() != day or round_trip.time().replace(tzinfo=None) != post_time:
+        return None
+    return candidate
+
+
 def upcoming_slots(settings, now=None, limit=None):
     now = now or timezone.now()
     local_now = now.astimezone(_zone(settings.timezone))
@@ -26,7 +37,9 @@ def upcoming_slots(settings, now=None, limit=None):
         day = local_now.date() + timedelta(days=offset)
         if day.weekday() not in days:
             continue
-        local_slot = datetime.combine(day, settings.post_time, tzinfo=_zone(settings.timezone))
+        local_slot = _valid_local_slot(day, settings.post_time, _zone(settings.timezone))
+        if local_slot is None:
+            continue
         slot = local_slot.astimezone(ZoneInfo("UTC"))
         if slot <= now + timedelta(minutes=5):
             continue
@@ -72,6 +85,7 @@ def generate_post(settings, brief=None, scheduled_for=None, generator=None, imag
     except Exception as exc:
         post.generation_metadata = {**post.generation_metadata, "image": {"status": "failed", "message": str(exc)}}
         post.save(update_fields=["generation_metadata", "updated_at"])
+    sync_post(post)
     return post
 
 

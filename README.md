@@ -125,7 +125,7 @@ python manage.py test prospecting llm knowledge_base
 
 ## LinkedIn content automation
 
-The repository includes a configuration-driven LinkedIn Studio with reusable brand memory, AI copy and hashtag generation, optional image generation, approval workflow, timezone-aware scheduling, and signed webhook delivery to an approved posting provider. See [docs/LINKEDIN_AUTOMATION.md](docs/LINKEDIN_AUTOMATION.md) for setup and the provider payload contract.
+The repository includes the platform-neutral Content Studio with reusable brand memory, sources, per-network variants, immutable approval versions, media validation, timezone-aware scheduling, provider-neutral publishing, and analytics. Existing LinkedIn routes remain compatible. See [Content Studio architecture](docs/CONTENT_STUDIO_ARCHITECTURE.md), [operations](docs/CONTENT_STUDIO_OPERATIONS.md), [rollout and rollback](docs/CONTENT_STUDIO_ROLLOUT_CHECKLIST.md), and the [legacy LinkedIn guide](docs/LINKEDIN_AUTOMATION.md).
 
 # 🧠 Nomad Bot — Complete Architecture Documentation
 

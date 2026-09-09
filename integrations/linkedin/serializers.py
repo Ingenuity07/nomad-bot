@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from .assets import image_asset_url
 from .models import ContentBrief, LinkedInAutomationSettings, LinkedInPost
 
 
@@ -66,3 +67,9 @@ class LinkedInPostSerializer(serializers.ModelSerializer):
     def get_character_count(self, obj):
         tags = " ".join(obj.hashtags)
         return len(f"{obj.body}\n\n{tags}".strip())
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if instance.image_data:
+            data["image_url"] = image_asset_url(instance)
+        return data

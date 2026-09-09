@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import requests
 from django.conf import settings
 
+from ..assets import image_asset_url
+
 
 class PublisherConfigurationError(RuntimeError):
     pass
@@ -131,8 +133,9 @@ class BufferPublisher:
             "aiAssisted": True,
             "assets": [],
         }
-        if post.image_url:
-            post_input["assets"] = [{"image": {"url": post.image_url}}]
+        asset_url = image_asset_url(post)
+        if asset_url:
+            post_input["assets"] = [{"image": {"url": asset_url}}]
         data = _graphql(self.CREATE_POST, {"input": post_input})
         result = data.get("data", {}).get("createPost") or {}
         if result.get("message"):
@@ -164,7 +167,7 @@ class WebhookPublisher:
             "page_name": post.settings.page_name,
             "target": self.target,
             "text": _post_text(post),
-            "image_url": post.image_url,
+            "image_url": image_asset_url(post),
             "image_prompt": post.image_prompt,
             "alt_text": post.alt_text,
             "scheduled_for": post.scheduled_for.isoformat(),

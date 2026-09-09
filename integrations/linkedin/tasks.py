@@ -3,6 +3,8 @@ import logging
 from celery import shared_task
 from django.utils import timezone
 
+from integrations.social.services.linkedin_compat import record_provider_event, sync_post
+
 from .models import LinkedInAutomationSettings, LinkedInPost
 from .services.publishers import BufferPublisher, LinkedInPublisher
 from .services.scheduler import fill_queue
@@ -23,6 +25,7 @@ def publish_post(post):
         post.status = LinkedInPost.FAILED
         post.failure_reason = str(exc)
     post.save()
+    sync_post(post)
     return post
 
 
@@ -48,6 +51,8 @@ def publish_due_posts():
     for post in due:
         if post.settings.publisher == post.settings.MANUAL:
             if LinkedInPost.objects.filter(pk=post.pk, status=LinkedInPost.SCHEDULED).update(status=LinkedInPost.READY, failure_reason=""):
+                post.refresh_from_db()
+                sync_post(post)
                 ready += 1
             continue
         claimed = LinkedInPost.objects.filter(pk=post.pk, status=LinkedInPost.SCHEDULED).update(status=LinkedInPost.PUBLISHING)
@@ -89,6 +94,7 @@ def sync_submitted_posts():
             else:
                 pending += 1
             post.save()
+            record_provider_event(post, "buffer.status", result)
         except Exception:
             pending += 1
             logger.exception("Could not sync Buffer post %s", post.external_post_id)

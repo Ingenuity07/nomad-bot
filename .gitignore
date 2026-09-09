@@ -21,6 +21,9 @@ env/
 ENV/
 
 *.md
+!docs/CONTENT_STUDIO_ARCHITECTURE.md
+!docs/CONTENT_STUDIO_OPERATIONS.md
+!docs/CONTENT_STUDIO_ROLLOUT_CHECKLIST.md
 
 # Databases (Local/SQLite development)
 *.db

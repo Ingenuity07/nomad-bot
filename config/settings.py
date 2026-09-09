@@ -11,7 +11,20 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+import json
 import os
+import sys
+
+
+def _env_bool(name, default=False):
+    return os.environ.get(name, "true" if default else "false").strip().lower() in {"true", "1", "yes"}
+
+
+def _bounded_env_int(name, default, minimum, maximum):
+    value = int(os.environ.get(name, str(default)))
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}.")
+    return value
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,18 +44,21 @@ def load_env_file():
 
 load_env_file()
 
-# Allow database operations in threads with running event loops
-os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-
-
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-qs+p#ex#4di*v=m6uqjim74r4a3r5ar&o*2^nk!n#8+1sivr3a'
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Local development remains convenient, but production must opt out explicitly
+# and provide its own secret through the deployment secret manager.
+DEBUG = _env_bool("DEBUG", True)
+if DEBUG or "test" in sys.argv:
+    # Local notebooks and tests may call sync ORM code from an event-loop thread.
+    os.environ.setdefault("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
+else:
+    os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
+_development_secret = 'django-insecure-qs+p#ex#4di*v=m6uqjim74r4a3r5ar&o*2^nk!n#8+1sivr3a'
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", _development_secret if DEBUG else "")
+if not DEBUG and not SECRET_KEY:
+    raise ValueError("DJANGO_SECRET_KEY is required when DEBUG is false.")
 
 # Allowed Hostnames
 ALLOWED_HOSTS=[]
@@ -50,14 +66,34 @@ allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "")
 if allowed_hosts_env:
     ALLOWED_HOSTS = [host.strip() for host in allowed_hosts_env.split(",") if host.strip()]
 else:
-    ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '127.0.0.1:8000', 'localhost:8000', 'shareholders-workplace-like-morgan.trycloudflare.com']
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0'] if DEBUG else []
+if not DEBUG and not ALLOWED_HOSTS:
+    raise ValueError("ALLOWED_HOSTS is required when DEBUG is false.")
 
 # CSRF Trusted Origins
 csrf_origins_env = os.environ.get("CSRF_TRUSTED_ORIGINS", "")
 if csrf_origins_env:
     CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins_env.split(",") if origin.strip()]
 
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = _env_bool("CORS_ALLOW_ALL_ORIGINS", DEBUG)
+CORS_ALLOW_CREDENTIALS = _env_bool("CORS_ALLOW_CREDENTIALS", DEBUG)
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", not DEBUG)
+CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", not DEBUG)
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = False
+SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", not DEBUG)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_HSTS_SECONDS = _bounded_env_int("SECURE_HSTS_SECONDS", 0 if DEBUG else 31536000, 0, 63072000)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", not DEBUG)
+SECURE_HSTS_PRELOAD = _env_bool("SECURE_HSTS_PRELOAD", False)
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
 
 
 # Application definition
@@ -82,6 +118,7 @@ INSTALLED_APPS = [
     'knowledge_base',
     'prospecting',
     'integrations.instagram',
+    'integrations.social',
     'integrations.linkedin',
 ]
 
@@ -362,7 +399,6 @@ CHANNEL_LAYERS = {
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-import sys
 import dj_database_url
 
 if 'test' in sys.argv:
@@ -454,6 +490,54 @@ USE_TZ = True
 STATIC_URL = 'static/'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+SOCIAL_MEDIA_PRIVATE_ROOT = Path(
+    os.environ.get("SOCIAL_MEDIA_PRIVATE_ROOT", BASE_DIR / ".private_social_media")
+)
+SOCIAL_MEDIA_PUBLISH_ROOT = Path(
+    os.environ.get("SOCIAL_MEDIA_PUBLISH_ROOT", MEDIA_ROOT)
+)
+SOCIAL_MEDIA_PRIVATE_STORAGE_BACKEND = os.environ.get(
+    "SOCIAL_MEDIA_PRIVATE_STORAGE_BACKEND",
+    "django.core.files.storage.FileSystemStorage",
+)
+SOCIAL_MEDIA_PUBLISH_STORAGE_BACKEND = os.environ.get(
+    "SOCIAL_MEDIA_PUBLISH_STORAGE_BACKEND",
+    "django.core.files.storage.FileSystemStorage",
+)
+SOCIAL_MEDIA_PRIVATE_STORAGE_OPTIONS = (
+    {"location": str(SOCIAL_MEDIA_PRIVATE_ROOT)}
+    if SOCIAL_MEDIA_PRIVATE_STORAGE_BACKEND == "django.core.files.storage.FileSystemStorage"
+    else json.loads(os.environ.get("SOCIAL_MEDIA_PRIVATE_STORAGE_OPTIONS", "{}"))
+)
+SOCIAL_MEDIA_PUBLISH_STORAGE_OPTIONS = (
+    {
+        "location": str(SOCIAL_MEDIA_PUBLISH_ROOT),
+        "base_url": MEDIA_URL,
+    }
+    if SOCIAL_MEDIA_PUBLISH_STORAGE_BACKEND == "django.core.files.storage.FileSystemStorage"
+    else json.loads(os.environ.get("SOCIAL_MEDIA_PUBLISH_STORAGE_OPTIONS", "{}"))
+)
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+    "social_private": {
+        "BACKEND": SOCIAL_MEDIA_PRIVATE_STORAGE_BACKEND,
+        "OPTIONS": SOCIAL_MEDIA_PRIVATE_STORAGE_OPTIONS,
+    },
+    "social_publish": {
+        "BACKEND": SOCIAL_MEDIA_PUBLISH_STORAGE_BACKEND,
+        "OPTIONS": SOCIAL_MEDIA_PUBLISH_STORAGE_OPTIONS,
+    },
+}
+SOCIAL_MEDIA_EXTERNAL_URL_ALLOWLIST = tuple(
+    hostname.strip().lower()
+    for hostname in os.environ.get("SOCIAL_MEDIA_EXTERNAL_URL_ALLOWLIST", "").split(",")
+    if hostname.strip()
+)
 
 # Per-run discovery observability. Each run gets a JSON trace plus a
 # self-contained HTML viewer in this directory.
@@ -476,12 +560,16 @@ CELERY_BEAT_SCHEDULE = {
         'schedule': 60 * 60,
     },
     'linkedin-publish-due-posts': {
-        'task': 'linkedin.publish_due_posts',
+        'task': 'social.publish_due_jobs',
         'schedule': 60,
     },
     'linkedin-sync-submitted-posts': {
-        'task': 'linkedin.sync_submitted_posts',
+        'task': 'social.reconcile_publish_jobs',
         'schedule': 5 * 60,
+    },
+    'social-refresh-post-metrics': {
+        'task': 'social.refresh_post_metrics',
+        'schedule': 60 * 60,
     },
 }
 
@@ -539,6 +627,21 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
+# Local/test-only compatibility escape hatch for the original anonymous
+# LinkedIn Studio. Production requests must authenticate and resolve through a
+# WorkspaceMembership. Set this explicitly to True only for local development.
+_content_automation_bootstrap_requested = os.environ.get(
+    "CONTENT_AUTOMATION_DEV_BOOTSTRAP",
+    "true" if "test" in sys.argv else "false",
+).lower() in ("true", "1", "yes")
+CONTENT_AUTOMATION_DEV_BOOTSTRAP = _content_automation_bootstrap_requested and (
+    DEBUG or "test" in sys.argv
+)
+CONTENT_AUTOMATION_ASSET_TOKEN_MAX_AGE_SECONDS = int(os.environ.get(
+    "CONTENT_AUTOMATION_ASSET_TOKEN_MAX_AGE_SECONDS",
+    str(30 * 24 * 60 * 60),
+))
+
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Nomad API',
     'DESCRIPTION': 'Interactive API documentation for Nomad Prospecting and Tool Platform.',
@@ -566,6 +669,10 @@ INSTAGRAM_MAX_RETRY_ATTEMPTS = int(os.environ.get("INSTAGRAM_MAX_RETRY_ATTEMPTS"
 # ── LinkedIn Content Automation ─────────────────────────────────────────────
 # Buffer is the preferred Company Page publisher. n8n is supported as a signed
 # workflow handoff; it still needs either Buffer or an eligible LinkedIn app.
+SOCIAL_PUBLISHER_DEFAULT = os.environ.get("SOCIAL_PUBLISHER_DEFAULT", "UPLOAD_POST").strip().upper()
+if SOCIAL_PUBLISHER_DEFAULT not in {"UPLOAD_POST", "ZERNIO"}:
+    raise ValueError("SOCIAL_PUBLISHER_DEFAULT must be UPLOAD_POST or ZERNIO.")
+
 BUFFER_API_URL = os.environ.get("BUFFER_API_URL", "https://api.buffer.com").strip()
 BUFFER_API_KEY = os.environ.get("BUFFER_API_KEY", "").strip()
 BUFFER_CHANNEL_ID = os.environ.get("BUFFER_CHANNEL_ID", "").strip()
@@ -585,6 +692,52 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5").strip()
 OPENAI_IMAGE_QUALITY = os.environ.get("OPENAI_IMAGE_QUALITY", "high").strip().lower()
 PUBLIC_BACKEND_URL = os.environ.get("PUBLIC_BACKEND_URL", "http://localhost:8000").strip().rstrip("/")
+UPLOAD_POST_API_BASE_URL = os.environ.get(
+    "UPLOAD_POST_API_BASE_URL",
+    "https://api.upload-post.com/api",
+).strip().rstrip("/")
+UPLOAD_POST_API_KEY = os.environ.get("UPLOAD_POST_API_KEY", "").strip()
+UPLOAD_POST_WEBHOOK_SECRET = os.environ.get("UPLOAD_POST_WEBHOOK_SECRET", "").strip()
+UPLOAD_POST_CONNECTION_RETURN_URL = os.environ.get(
+    "UPLOAD_POST_CONNECTION_RETURN_URL",
+    "",
+).strip()
+UPLOAD_POST_HTTP_TIMEOUT_SECONDS = _bounded_env_int("UPLOAD_POST_HTTP_TIMEOUT_SECONDS", 30, 1, 60)
+ZERNIO_API_BASE_URL = os.environ.get(
+    "ZERNIO_API_BASE_URL",
+    "https://zernio.com/api",
+).strip().rstrip("/")
+ZERNIO_API_KEY = os.environ.get("ZERNIO_API_KEY", "").strip()
+ZERNIO_WEBHOOK_SECRET = os.environ.get("ZERNIO_WEBHOOK_SECRET", "").strip()
+ZERNIO_CONNECTION_RETURN_URL = os.environ.get(
+    "ZERNIO_CONNECTION_RETURN_URL",
+    "",
+).strip()
+ZERNIO_HTTP_TIMEOUT_SECONDS = _bounded_env_int("ZERNIO_HTTP_TIMEOUT_SECONDS", 30, 1, 60)
+SOCIAL_PUBLISH_MAX_ATTEMPTS = _bounded_env_int("SOCIAL_PUBLISH_MAX_ATTEMPTS", 3, 1, 5)
+SOCIAL_PUBLISH_RETRY_BASE_SECONDS = _bounded_env_int("SOCIAL_PUBLISH_RETRY_BASE_SECONDS", 60, 1, 3600)
+SOCIAL_PUBLISH_RETRY_MAX_SECONDS = _bounded_env_int("SOCIAL_PUBLISH_RETRY_MAX_SECONDS", 900, 1, 86400)
+if SOCIAL_PUBLISH_RETRY_MAX_SECONDS < SOCIAL_PUBLISH_RETRY_BASE_SECONDS:
+    raise ValueError("SOCIAL_PUBLISH_RETRY_MAX_SECONDS must be at least SOCIAL_PUBLISH_RETRY_BASE_SECONDS.")
+SOCIAL_PUBLISH_CLAIM_TTL_SECONDS = _bounded_env_int("SOCIAL_PUBLISH_CLAIM_TTL_SECONDS", 300, 30, 3600)
+SOCIAL_HEALTH_OVERDUE_JOB_MINUTES = _bounded_env_int("SOCIAL_HEALTH_OVERDUE_JOB_MINUTES", 10, 1, 1440)
+SOCIAL_HEALTH_FAILED_JOB_THRESHOLD = _bounded_env_int("SOCIAL_HEALTH_FAILED_JOB_THRESHOLD", 5, 1, 10000)
+LINKEDIN_LEGACY_CALLBACK_REQUIRE_TIMESTAMP = _env_bool(
+    "LINKEDIN_LEGACY_CALLBACK_REQUIRE_TIMESTAMP",
+    not DEBUG,
+)
+LINKEDIN_LEGACY_CALLBACK_MAX_AGE_SECONDS = _bounded_env_int(
+    "LINKEDIN_LEGACY_CALLBACK_MAX_AGE_SECONDS",
+    300,
+    30,
+    3600,
+)
+CONTENT_STUDIO_DRAFT_ONLY_ALLOWED = os.environ.get(
+    "CONTENT_STUDIO_DRAFT_ONLY_ALLOWED", "true"
+).strip().lower() in {"true", "1", "yes"}
+SOCIAL_QUALITY_LLM_ENABLED = os.environ.get(
+    "SOCIAL_QUALITY_LLM_ENABLED", "false" if "test" in sys.argv else "true"
+).strip().lower() in {"true", "1", "yes"}
 
 # ── Remote Celery Worker Keep-Alive & Wake Configuration ─────────────────────
 WORKER_1_URL = os.environ.get("WORKER_1_URL", "http://127.0.0.1:10000").rstrip("/")

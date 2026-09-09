@@ -2,6 +2,8 @@
 
 Welcome to the **Nomad Bot V3.5** system architecture documentation. This document outlines the modular design, core execution pipelines, fallback mechanisms, cost-control guards, and agentic loops powering the AIOS (Agentic Input Output System) workspace.
 
+Content Studio's current tenancy, social domain, publishing lifecycle, media safety, and compatibility design is maintained separately in [docs/CONTENT_STUDIO_ARCHITECTURE.md](docs/CONTENT_STUDIO_ARCHITECTURE.md). Production operations and rollout controls are in [docs/CONTENT_STUDIO_OPERATIONS.md](docs/CONTENT_STUDIO_OPERATIONS.md) and [docs/CONTENT_STUDIO_ROLLOUT_CHECKLIST.md](docs/CONTENT_STUDIO_ROLLOUT_CHECKLIST.md).
+
 ---
 
 ## Table of Contents
