@@ -11,6 +11,12 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from integrations.linkedin.services.images import (
+    ImageGenerationConfigurationError,
+    ImageGenerationError,
+    ImageGenerationQuotaError,
+    ImageProviderUnavailableError,
+)
 from integrations.social.models import (
     ConnectionState,
     MediaAsset,
@@ -344,3 +350,39 @@ class SocialMediaApiTests(TestCase):
         self.assertEqual(response.data["alt_text"], "Generated visual")
         self.assertFalse(MediaAsset.objects.filter(pk=old_id).exists())
         self.assertEqual(self.variant.media_assets.count(), 1)
+
+    def test_ai_regeneration_returns_distinct_provider_errors(self):
+        cases = [
+            (ImageGenerationQuotaError("quota"), 429, "image_generation_quota"),
+            (ImageGenerationConfigurationError("configuration"), 503, "image_generation_not_configured"),
+            (ImageProviderUnavailableError("outage"), 502, "image_provider_unavailable"),
+            (ImageGenerationError("invalid response"), 502, "image_generation_failed"),
+        ]
+
+        for error, expected_status, expected_code in cases:
+            with self.subTest(code=expected_code), patch(
+                "integrations.social.views.LinkedInImageGenerator.generate",
+                side_effect=error,
+            ), self.assertLogs("integrations.social.views", level="ERROR"):
+                response = self.client.post(
+                    reverse("social-media-regenerate", args=[self.variant.id]),
+                    {"prompt": "A calm editorial visual"},
+                    format="json",
+                )
+
+            self.assertEqual(response.status_code, expected_status)
+            self.assertEqual(response.data["code"], expected_code)
+
+    def test_ai_regeneration_reports_missing_configuration(self):
+        with patch(
+            "integrations.social.views.LinkedInImageGenerator.generate",
+            return_value=("", {"status": "not_configured"}, b""),
+        ):
+            response = self.client.post(
+                reverse("social-media-regenerate", args=[self.variant.id]),
+                {"prompt": "A calm editorial visual"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["code"], "image_generation_not_configured")

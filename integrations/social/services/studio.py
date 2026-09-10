@@ -185,7 +185,9 @@ def _recalculate_post_state(post):
 
 @transaction.atomic
 def approve_exact_version(variant, version_id, *, user):
-    variant = SocialPostVariant.objects.select_for_update().select_related("post", "connection").get(pk=variant.pk)
+    # Lock only the variant row. Joining the nullable connection relation here
+    # makes PostgreSQL reject FOR UPDATE on the nullable side of an outer join.
+    variant = SocialPostVariant.objects.select_for_update().get(pk=variant.pk)
     version = SocialPostVersion.objects.filter(variant=variant, pk=version_id).order_by("-version").first()
     latest = variant.versions.order_by("-version").first()
     if version is None:
@@ -202,7 +204,8 @@ def approve_exact_version(variant, version_id, *, user):
     adapter = publishing_provider_registry.create(ProviderName(variant.connection.provider))
     validate_variant_media(variant, adapter.capabilities)
     now = timezone.now()
-    SocialPostVersion.objects.filter(pk=version.pk).update(approved_at=now, approved_by=user)
+    approved_by = user if getattr(user, "is_authenticated", False) else None
+    SocialPostVersion.objects.filter(pk=version.pk).update(approved_at=now, approved_by=approved_by)
     metadata = dict(variant.metadata)
     metadata.update({"review_state": "APPROVED", "reviewed_at": now.isoformat()})
     metadata.pop("review_note", None)
@@ -213,7 +216,7 @@ def approve_exact_version(variant, version_id, *, user):
     variant.save(update_fields=["approved_version", "status", "failure_reason", "metadata", "updated_at"])
     _recalculate_post_state(variant.post)
     version.approved_at = now
-    version.approved_by = user
+    version.approved_by = approved_by
     return variant
 
 

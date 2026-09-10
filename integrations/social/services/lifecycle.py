@@ -157,6 +157,7 @@ def create_version(variant, *, approved_by=None, approved_at=None, quality_analy
         media_snapshot=media_snapshot,
         analyzer=quality_analyzer,
     )
+    approved_by = approved_by if getattr(approved_by, "is_authenticated", False) else None
     return SocialPostVersion.objects.create(
         variant=variant,
         version=(latest.version + 1) if latest else 1,
@@ -407,6 +408,38 @@ def _error_from_result(error_info):
 
 
 @transaction.atomic
+def claim_publish_job(job_id, *, now=None):
+    now = now or timezone.now()
+    token = uuid.uuid4()
+    claimed = (
+        PublishJob.objects.filter(
+            pk=job_id,
+            status=PublishJobState.SCHEDULED,
+            scheduled_for__lte=now,
+            attempt_count__lt=django_settings.SOCIAL_PUBLISH_MAX_ATTEMPTS,
+        )
+        .filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
+        .update(
+            status=PublishJobState.PUBLISHING,
+            claim_token=token,
+            claimed_at=now,
+            failure_message="",
+            diagnostic_details={},
+        )
+    )
+    if not claimed:
+        return None
+    job = PublishJob.objects.select_related("variant__post").get(pk=job_id)
+    _set_variant_state(job.variant, SocialPostState.PUBLISHING)
+    record_audit_event(
+        workspace=job.variant.post.workspace,
+        event_type=SocialAuditEventType.PUBLISH_STARTED,
+        target=job,
+        details={"provider": job.provider, "attempt_number": job.attempt_count + 1},
+    )
+    return JobClaim(job_id=job_id, claim_token=token)
+
+
 def claim_due_jobs(*, now=None, limit=100):
     now = now or timezone.now()
     provider_values = [provider.value for provider in ProviderName]
@@ -423,35 +456,51 @@ def claim_due_jobs(*, now=None, limit=100):
     )
     claims = []
     for job_id in candidates:
-        token = uuid.uuid4()
-        claimed = (
-            PublishJob.objects.filter(
-                pk=job_id,
-                status=PublishJobState.SCHEDULED,
-                scheduled_for__lte=now,
-                attempt_count__lt=django_settings.SOCIAL_PUBLISH_MAX_ATTEMPTS,
-            )
-            .filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
-            .update(
-                status=PublishJobState.PUBLISHING,
-                claim_token=token,
-                claimed_at=now,
-                failure_message="",
-                diagnostic_details={},
-            )
-        )
-        if claimed:
-            job = PublishJob.objects.select_related("variant__post").get(pk=job_id)
-            variant = job.variant
-            _set_variant_state(variant, SocialPostState.PUBLISHING)
-            record_audit_event(
-                workspace=variant.post.workspace,
-                event_type=SocialAuditEventType.PUBLISH_STARTED,
-                target=job,
-                details={"provider": job.provider, "attempt_number": job.attempt_count + 1},
-            )
-            claims.append(JobClaim(job_id=job_id, claim_token=token))
+        claim = claim_publish_job(job_id, now=now)
+        if claim is not None:
+            claims.append(claim)
     return tuple(claims)
+
+
+def publish_variant_now(variant, *, now=None):
+    """Create and synchronously execute one idempotent job for an approved variant."""
+    from integrations.social.services.publishing_routing import create_publish_job
+
+    now = now or timezone.now()
+    with transaction.atomic():
+        # Keep nullable relations out of the row-lock query for PostgreSQL.
+        variant = SocialPostVariant.objects.select_for_update().get(pk=variant.pk)
+        if variant.approved_version_id is None:
+            raise ValidationError("Approve the current version before publishing.")
+        if variant.status not in {
+            SocialPostState.APPROVED,
+            SocialPostState.SCHEDULED,
+            SocialPostState.PUBLISHING,
+            SocialPostState.SUBMITTED,
+            SocialPostState.PUBLISHED,
+        }:
+            raise InvalidStateTransition("Only an approved post can be published now.")
+        approved_version = variant.approved_version
+        connection = variant.connection
+        route = create_publish_job(
+            variant=variant,
+            approved_version=approved_version,
+            idempotency_key=f"publish-now:{variant.id}:{approved_version.id}",
+            provider_account_id=connection.provider_account_id if connection else "",
+            provider_profile_id=connection.provider_profile_id if connection else "",
+            scheduled_for=now,
+        )
+
+    if not route.ready or route.publish_job_id is None:
+        raise ValidationError(route.detail or "Reconnect the social account before publishing.")
+    job = PublishJob.objects.get(pk=route.publish_job_id)
+    if job.status != PublishJobState.SCHEDULED:
+        return job
+    claim = claim_publish_job(job.id, now=now)
+    if claim is None:
+        job.refresh_from_db()
+        return job
+    return execute_claimed_job(claim)
 
 
 def execute_claimed_job(claim):

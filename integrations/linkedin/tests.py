@@ -18,7 +18,11 @@ from prospecting.models import Workspace, WorkspaceMembership
 from .models import ContentBrief, LinkedInAutomationSettings, LinkedInPost
 from .assets import image_asset_url
 from .services.content import GeneratedPostContent, LinkedInContentGenerator
-from .services.images import LinkedInImageGenerator
+from .services.images import (
+    ImageGenerationConfigurationError,
+    ImageProviderUnavailableError,
+    LinkedInImageGenerator,
+)
 from .services.publishers import BufferPublisher
 from .services.scheduler import generate_post, upcoming_slots
 from .tasks import publish_post, sync_submitted_posts
@@ -146,6 +150,35 @@ class LinkedInImageGeneratorTests(TestCase):
         request_post.return_value = response
 
         with self.assertRaisesRegex(RuntimeError, "Enable billing or increase"):
+            LinkedInImageGenerator().generate("post-id", "A delivery route")
+
+    @override_settings(
+        LINKEDIN_GENERATE_IMAGES=True,
+        LINKEDIN_IMAGE_PROVIDER="gemini",
+        GEMINI_API_KEY="gemini-key",
+        GEMINI_IMAGE_MODEL="gemini-3.1-flash-image",
+    )
+    @patch("integrations.linkedin.services.images.requests.post")
+    def test_gemini_rejected_configuration_is_classified(self, request_post):
+        response = Mock(status_code=400)
+        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+        response.json.return_value = {"error": {"message": "Invalid image format"}}
+        request_post.return_value = response
+
+        with self.assertRaisesRegex(ImageGenerationConfigurationError, "Invalid image format"):
+            LinkedInImageGenerator().generate("post-id", "A delivery route")
+
+    @override_settings(
+        LINKEDIN_GENERATE_IMAGES=True,
+        LINKEDIN_IMAGE_PROVIDER="gemini",
+        GEMINI_API_KEY="gemini-key",
+        GEMINI_IMAGE_MODEL="gemini-3.1-flash-image",
+    )
+    @patch("integrations.linkedin.services.images.requests.post")
+    def test_gemini_network_failure_is_classified(self, request_post):
+        request_post.side_effect = requests.Timeout("request timed out")
+
+        with self.assertRaises(ImageProviderUnavailableError):
             LinkedInImageGenerator().generate("post-id", "A delivery route")
 
 

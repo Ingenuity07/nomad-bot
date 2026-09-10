@@ -130,6 +130,7 @@ def create_publish_job(
     idempotency_key,
     provider_account_id="",
     provider_profile_id="",
+    scheduled_for=None,
 ):
     if approved_version.variant_id != variant.id:
         raise ValidationError("The approved version must belong to the publish variant.")
@@ -138,12 +139,17 @@ def create_publish_job(
     if variant.approved_version_id not in {None, approved_version.id}:
         raise ValidationError("The selected approval is no longer current.")
 
+    effective_schedule = scheduled_for or approved_version.scheduled_for
+
     existing = PublishJob.objects.select_for_update().filter(
         idempotency_key=idempotency_key,
     ).first()
     if existing is not None:
         if existing.variant_id != variant.id or existing.approved_version_id != approved_version.id:
             raise ValidationError("The idempotency key belongs to a different publish job.")
+        if existing.status == PublishJobState.SCHEDULED and existing.scheduled_for != effective_schedule:
+            existing.scheduled_for = effective_schedule
+            existing.save(update_fields=["scheduled_for", "updated_at"])
         return PublishingRouteResult(
             provider=_provider_name(existing.provider),
             outcome=RoutingOutcome.READY,
@@ -156,6 +162,9 @@ def create_publish_job(
         approved_version=approved_version,
     ).first()
     if existing is not None:
+        if existing.status == PublishJobState.SCHEDULED and existing.scheduled_for != effective_schedule:
+            existing.scheduled_for = effective_schedule
+            existing.save(update_fields=["scheduled_for", "updated_at"])
         return PublishingRouteResult(
             provider=_provider_name(existing.provider),
             outcome=RoutingOutcome.READY,
@@ -196,7 +205,7 @@ def create_publish_job(
                 approved_version=approved_version,
                 provider=route.provider.value,
                 idempotency_key=idempotency_key,
-                scheduled_for=approved_version.scheduled_for,
+                scheduled_for=effective_schedule,
                 status=PublishJobState.SCHEDULED,
             )
     except IntegrityError:

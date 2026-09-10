@@ -2,6 +2,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -17,9 +18,12 @@ from integrations.social.models import (
     SocialPostVariant,
     SocialProvider,
     SocialWorkspaceSettings,
+    PublishJob,
+    PublishJobState,
 )
 from integrations.social.publishing.fakes import FakeUploadPostProvider
 from integrations.social.services.composer import submit_for_review
+from integrations.social.services.studio import approve_exact_version
 from prospecting.models import Workspace, WorkspaceMembership
 
 
@@ -94,6 +98,53 @@ class ContentStudioScreensApiTests(TestCase):
         self.variant.refresh_from_db()
         self.assertIsNone(self.variant.approved_version_id)
         self.assertEqual(self.variant.status, SocialPostState.NEEDS_REVIEW)
+
+    def test_exact_version_approval_accepts_dev_bootstrap_actor(self):
+        version = self.variant.versions.latest("version")
+
+        with patch(
+            "integrations.social.services.studio.publishing_provider_registry.create",
+            return_value=FakeUploadPostProvider(),
+        ):
+            approve_exact_version(self.variant, version.id, user=AnonymousUser())
+
+        version.refresh_from_db()
+        self.assertIsNone(version.approved_by)
+        self.assertIsNotNone(version.approved_at)
+
+    def test_approved_version_can_be_published_immediately_and_idempotently(self):
+        version = self.variant.versions.latest("version")
+        provider = FakeUploadPostProvider()
+        with patch(
+            "integrations.social.services.studio.publishing_provider_registry.create",
+            return_value=provider,
+        ):
+            approve_exact_version(self.variant, version.id, user=self.user)
+
+        before_publish = timezone.now()
+        with patch(
+            "integrations.social.services.lifecycle.publishing_provider_registry.create",
+            return_value=provider,
+        ):
+            first = self.client.post(
+                reverse("social-publish-now", args=[self.variant.id]),
+                {},
+                format="json",
+            )
+            second = self.client.post(
+                reverse("social-publish-now", args=[self.variant.id]),
+                {},
+                format="json",
+            )
+
+        self.assertEqual(first.status_code, 202, first.data)
+        self.assertEqual(first.data["publish_job"]["status"], PublishJobState.SUBMITTED)
+        self.assertEqual(second.status_code, 202, second.data)
+        self.assertEqual(PublishJob.objects.filter(variant=self.variant).count(), 1)
+        job = PublishJob.objects.get(variant=self.variant)
+        self.assertGreaterEqual(job.scheduled_for, before_publish)
+        self.assertLessEqual(job.scheduled_for, timezone.now())
+        self.assertEqual(provider.calls.count("publish_now"), 1)
 
     def test_request_changes_reject_and_batch_approval(self):
         changed = self.client.post(reverse("social-approval-action", args=[self.variant.id]), {

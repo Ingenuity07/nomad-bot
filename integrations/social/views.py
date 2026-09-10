@@ -1,3 +1,5 @@
+import logging
+
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.conf import settings as django_settings
@@ -35,6 +37,7 @@ from integrations.social.models import (
     ContentSource,
     MediaAsset,
     MediaAssetSource,
+    PublishJobState,
     SocialNetwork,
     SocialConnection,
     SocialPost,
@@ -97,6 +100,7 @@ from integrations.social.services.lifecycle import (
     ProviderWebhookReplayError,
     approve_variant,
     process_provider_webhook,
+    publish_variant_now,
 )
 from integrations.social.services.publishing_routing import (
     provider_readiness,
@@ -120,8 +124,17 @@ from integrations.social.services.studio import (
     serialize_connection,
     serialize_variant_card,
 )
-from integrations.linkedin.services.images import LinkedInImageGenerator
+from integrations.linkedin.services.images import (
+    ImageGenerationConfigurationError,
+    ImageGenerationError,
+    ImageGenerationQuotaError,
+    ImageProviderUnavailableError,
+    LinkedInImageGenerator,
+)
 from integrations.linkedin.workspaces import resolve_active_workspace
+
+
+logger = logging.getLogger(__name__)
 
 
 class ContentStudioEnvelopeSerializer(serializers.Serializer):
@@ -570,6 +583,47 @@ class SocialApprovalActionAPIView(SocialWorkspaceScopedAPIView):
         return Response(review_queue(variant.post.workspace))
 
 
+class SocialPublishNowAPIView(SocialWorkspaceScopedAPIView):
+    def post(self, request, variant_id):
+        variant = self.variant(request, variant_id)
+        try:
+            job = publish_variant_now(variant)
+        except DjangoValidationError as error:
+            return social_validation_response(error)
+        except Exception:
+            logger.exception("Unexpected immediate publishing failure for social variant %s.", variant.id)
+            return Response(
+                {"code": "publish_failed", "detail": "The post could not be submitted for publishing."},
+                status=502,
+            )
+
+        variant = (
+            SocialPostVariant.objects.select_related("post__source", "connection")
+            .prefetch_related("media_assets")
+            .get(pk=variant.id)
+        )
+        payload = {
+            "variant": serialize_variant_card(variant),
+            "publish_job": {
+                "id": str(job.id),
+                "status": job.status,
+                "external_id": job.external_id,
+                "failure_message": job.failure_message,
+            },
+        }
+        if job.status == PublishJobState.FAILED:
+            payload["detail"] = job.failure_message or "The publishing provider rejected the post."
+            return Response(payload, status=502)
+        if job.status == PublishJobState.CONNECTION_REQUIRED:
+            payload["detail"] = job.failure_message or "Reconnect the social account before publishing."
+            return Response(payload, status=409)
+        if job.status == PublishJobState.SCHEDULED:
+            payload["detail"] = job.failure_message or "The provider is temporarily unavailable; publishing will be retried."
+            return Response(payload, status=503)
+        response_status = 200 if job.status == PublishJobState.PUBLISHED else 202
+        return Response(payload, status=response_status)
+
+
 class SocialBatchApprovalAPIView(SocialWorkspaceScopedAPIView):
     def post(self, request):
         workspace = self.workspace(request)
@@ -894,10 +948,41 @@ class SocialMediaRegenerateAPIView(SocialWorkspaceScopedAPIView):
             return Response({"prompt": ["Describe the image to generate."]}, status=400)
         try:
             _, metadata, image_data = LinkedInImageGenerator().generate(variant.id, prompt)
+        except ImageGenerationQuotaError:
+            logger.exception("Image generation quota exhausted for social variant %s.", variant.id)
+            return Response(
+                {"code": "image_generation_quota", "detail": "Image generation quota is unavailable."},
+                status=429,
+            )
+        except ImageGenerationConfigurationError:
+            logger.exception("Image generation configuration rejected for social variant %s.", variant.id)
+            return Response(
+                {"code": "image_generation_not_configured", "detail": "Image generation is not configured correctly."},
+                status=503,
+            )
+        except ImageProviderUnavailableError:
+            logger.exception("Image provider unavailable for social variant %s.", variant.id)
+            return Response(
+                {"code": "image_provider_unavailable", "detail": "The image provider is temporarily unavailable."},
+                status=502,
+            )
+        except ImageGenerationError:
+            logger.exception("Image generation failed for social variant %s.", variant.id)
+            return Response(
+                {"code": "image_generation_failed", "detail": "The image could not be generated."},
+                status=502,
+            )
         except Exception:
-            return Response({"detail": "The image could not be generated."}, status=502)
+            logger.exception("Unexpected image generation failure for social variant %s.", variant.id)
+            return Response(
+                {"code": "image_generation_failed", "detail": "The image could not be generated."},
+                status=502,
+            )
         if not image_data:
-            return Response({"detail": "Image generation is not configured."}, status=400)
+            return Response(
+                {"code": "image_generation_not_configured", "detail": "Image generation is not configured."},
+                status=503,
+            )
         content_type = str(metadata.get("content_type") or "image/png")
         uploaded_file = SimpleUploadedFile(
             f"generated-{variant.id}.png",
